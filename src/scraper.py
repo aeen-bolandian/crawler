@@ -66,7 +66,7 @@ class ScraperConfig:
 
     # Timeouts in milliseconds
     PAGE_LOAD_TIMEOUT_MS: int = 15_000
-    POST_GOTO_SETTLE_MS: int = 5_000
+    POST_GOTO_SETTLE_MS: int = 3_000
     POST_TAB_CLICK_SETTLE_MS: int = 2_000
     POST_MORE_EXPAND_SETTLE_MS: int = 300
     PLACE_PAGE_WAIT_MS: int = 10_000
@@ -77,6 +77,9 @@ class ScraperConfig:
     SCROLL_MAX_ITERATIONS: int = 10
     SCROLL_WAIT_FOR_NEW_CARD_MS: int = 1_500
     SCROLL_MAX_STAGNANT: int = 2
+
+    # Tab rotation
+    MAX_CAFES_PER_TAB: int = 10
 
     # Results to inspect
     MAX_RESULTS_TO_TRY: int = 20
@@ -236,6 +239,21 @@ def names_look_same(name1: str, name2: str) -> bool:
     return bool(common)
 
 
+def _is_crash_error(err: BaseException) -> bool:
+    """Check if exception indicates a browser tab or context crash."""
+    err_str = str(err).lower()
+    return any(
+        k in err_str
+        for k in (
+            "crash",
+            "target closed",
+            "target page, context or browser has been closed",
+            "session closed",
+            "connection closed",
+        )
+    )
+
+
 class ScraperWorker:
     """Scrapes Google Maps reviews using an assigned or claimed browser tab."""
 
@@ -246,6 +264,7 @@ class ScraperWorker:
         page_pool: asyncio.Queue,
         max_reviews: int = 150,
         config: Optional[ScraperConfig] = None,
+        max_cafes_per_tab: Optional[int] = None,
     ) -> None:
         """Initialize the scraper worker.
 
@@ -255,12 +274,20 @@ class ScraperWorker:
             page_pool: Queue holding reusable browser tabs.
             max_reviews: Maximum review records to extract per venue.
             config: Scraper configuration parameters and selectors.
+            max_cafes_per_tab: Maximum cafes to process before rotating tab.
         """
         self.context = context
         self.worker_id = worker_id
         self.page_pool = page_pool
         self.max_reviews = max_reviews
         self.config = config or ScraperConfig()
+        self.max_cafes_per_tab = (
+            max_cafes_per_tab
+            if max_cafes_per_tab is not None
+            else self.config.MAX_CAFES_PER_TAB
+        )
+        self.cafes_processed_on_this_tab: int = 0
+        self._needs_new_page: bool = False
         self._page: Optional[Page] = None
         self._owns_page: bool = False
         self._last_skip_reason: Optional[str] = None
@@ -306,6 +333,44 @@ class ScraperWorker:
                 await self.page_pool.put(self._page)
             self._page = None
 
+    async def _rotate_tab(self, page: Optional[Page] = None) -> Page:
+        """Close current page, create a fresh page, and navigate to Google Maps.
+
+        Args:
+            page: Optional Page instance to close. Defaults to self._page.
+
+        Returns:
+            Newly created and navigated Page instance.
+        """
+        target_page = page if page is not None else self._page
+        if target_page is not None:
+            try:
+                if not target_page.is_closed():
+                    await target_page.close()
+            except Exception as err:
+                logger.debug(
+                    f"[w{self.worker_id}] error closing page during rotate: {err}"
+                )
+
+        new_page = await self.context.new_page()
+        try:
+            await new_page.goto(
+                "https://www.google.com/maps",
+                timeout=self.config.PAGE_LOAD_TIMEOUT_MS,
+                wait_until="commit",
+            )
+            await new_page.wait_for_timeout(3_000)
+        except Exception as err:
+            logger.warning(
+                f"[w{self.worker_id}] error navigating new tab: {err}"
+            )
+
+        self.cafes_processed_on_this_tab = 0
+        self._needs_new_page = False
+        self._page = new_page
+        self._owns_page = True
+        return new_page
+
     async def _dismiss_consent(self, page: Page) -> None:
         """Dismiss Google consent dialogs if present."""
         for selector in self.config.CONSENT_SELECTORS:
@@ -314,8 +379,9 @@ class ScraperWorker:
                 if await btn.is_visible(timeout=500):
                     await btn.click()
                     break
-            except Exception:
-                pass
+            except Exception as err:
+                if _is_crash_error(err):
+                    raise
 
     async def _click_reviews_tab(
         self, page: Page, target: Optional[ResolvedTarget] = None
@@ -331,14 +397,18 @@ class ScraperWorker:
                 timeout=10_000,
                 state="visible",
             )
-        except Exception:
+        except Exception as err:
+            if _is_crash_error(err):
+                raise
             try:
                 tab_el = await page.wait_for_selector(
                     self.config.SEL_REVIEWS_TAB_FALLBACK,
                     timeout=3_000,
                     state="visible",
                 )
-            except Exception:
+            except Exception as err2:
+                if _is_crash_error(err2):
+                    raise
                 tab_el = None
 
         if tab_el is None:
@@ -354,8 +424,9 @@ class ScraperWorker:
                     f"[w{self.worker_id}][{cafe_id}] Reviews tab already selected"
                 )
                 return True
-        except Exception:
-            pass
+        except Exception as err:
+            if _is_crash_error(err):
+                raise
 
         logger.debug(
             f"[w{self.worker_id}][{cafe_id}] Reviews tab found, clicking"
@@ -367,6 +438,8 @@ class ScraperWorker:
             )
             return True
         except Exception as err:
+            if _is_crash_error(err):
+                raise
             logger.warning(
                 f"[w{self.worker_id}][{cafe_id}] Reviews tab click failed: {err}"
             )
@@ -390,7 +463,9 @@ class ScraperWorker:
                 f"{count} cards"
             )
             return True
-        except Exception:
+        except Exception as err:
+            if _is_crash_error(err):
+                raise
             try:
                 await page.wait_for_selector(
                     self.config.SEL_REVIEW_ITEM_FALLBACK,
@@ -405,7 +480,9 @@ class ScraperWorker:
                     f"{count} cards"
                 )
                 return True
-            except Exception:
+            except Exception as err2:
+                if _is_crash_error(err2):
+                    raise
                 logger.warning(
                     f"[w{self.worker_id}][{cafe_id}] review cards timeout after "
                     f"{self.config.REVIEW_CARDS_WAIT_MS}ms"
@@ -422,11 +499,22 @@ class ScraperWorker:
             List of extracted ReviewRecord items. Empty list if skipped or failed.
         """
         self._last_skip_reason = None
+
+        if self._needs_new_page:
+            try:
+                await self._rotate_tab(self._page)
+            except Exception as err:
+                logger.error(
+                    f"Worker {self.worker_id}: failed rotating tab: {err}"
+                )
+            self._needs_new_page = False
+
         try:
             page = await self.ensure_page()
         except Exception as err:
             logger.error(f"Worker {self.worker_id}: failed acquiring page: {err}")
             self._last_skip_reason = SkipReason.EXCEPTION
+            self.cafes_processed_on_this_tab += 1
             return []
 
         t0 = time.monotonic()
@@ -443,11 +531,40 @@ class ScraperWorker:
                 f"[w{self.worker_id}][{target.cafe.id}] scrape() took "
                 f"{time.monotonic() - t0:.1f}s"
             )
+            self.cafes_processed_on_this_tab += 1
+            if self.cafes_processed_on_this_tab >= self.max_cafes_per_tab:
+                logger.info(
+                    f"[w{self.worker_id}] rotating tab after "
+                    f"{self.cafes_processed_on_this_tab} cafes"
+                )
+                try:
+                    await self._rotate_tab(page)
+                except Exception as err:
+                    logger.warning(
+                        f"[w{self.worker_id}] error during tab rotation: {err}"
+                    )
 
     async def _scrape_with_page(
         self, page: Page, target: ResolvedTarget
     ) -> list[ReviewRecord]:
-        """Internal scraping routine after obtaining page."""
+        """Internal scraping routine after obtaining page with crash recovery."""
+        try:
+            return await self._scrape_with_page_impl(page, target)
+        except Exception as err:
+            if _is_crash_error(err):
+                logger.warning(
+                    f"[w{self.worker_id}][{target.cafe.id}] "
+                    f"page crashed, will recreate: {err}"
+                )
+                self._last_skip_reason = SkipReason.EXCEPTION
+                self._needs_new_page = True
+                return []
+            raise
+
+    async def _scrape_with_page_impl(
+        self, page: Page, target: ResolvedTarget
+    ) -> list[ReviewRecord]:
+        """Core scraping routine after obtaining page."""
         try:
             logger.debug(
                 f"[w{self.worker_id}][{target.cafe.id}] goto START: {target.url}"
@@ -461,6 +578,8 @@ class ScraperWorker:
                 f"[w{self.worker_id}][{target.cafe.id}] goto DONE: {page.url}"
             )
         except Exception as err:
+            if _is_crash_error(err):
+                raise
             logger.warning(
                 f"Worker {self.worker_id}: nav failed for {target.url}: {err}"
             )
@@ -545,6 +664,8 @@ class ScraperWorker:
                 await matched_link.click()
                 await page.wait_for_timeout(self.config.POST_GOTO_SETTLE_MS)
             except Exception as err:
+                if _is_crash_error(err):
+                    raise
                 logger.warning(f"Worker {self.worker_id}: click link failed: {err}")
                 self._last_skip_reason = SkipReason.PAGE_NAV_FAILED
                 return []
@@ -651,6 +772,8 @@ class ScraperWorker:
                     scroll_js, self.config.SCROLL_MAX_ITERATIONS
                 )
             except Exception as err:
+                if _is_crash_error(err):
+                    raise
                 logger.debug(
                     f"[w{self.worker_id}][{target.cafe.id}] "
                     f"scroll eval failed: {err}"
@@ -698,6 +821,8 @@ class ScraperWorker:
                 f"expanded {expanded} More buttons"
             )
         except Exception as err:
+            if _is_crash_error(err):
+                raise
             logger.debug(
                 f"[w{self.worker_id}][{target.cafe.id}] expand failed: {err}"
             )
@@ -737,6 +862,8 @@ class ScraperWorker:
         try:
             raw = await page.evaluate(extract_js, self.max_reviews)
         except Exception as err:
+            if _is_crash_error(err):
+                raise
             logger.warning(
                 f"[w{self.worker_id}][{target.cafe.id}] extraction failed: {err}"
             )

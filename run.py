@@ -122,6 +122,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Only retry cafes present in --skipped-input",
     )
     parser.add_argument(
+        "--max-cafes-per-tab",
+        type=int,
+        default=10,
+        help="Rotate browser tab after N cafes",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -148,6 +154,7 @@ class CrawlerPipeline:
         workers: int = 4,
         retry_skipped: bool = False,
         retry_slugs: Optional[set[str]] = None,
+        max_cafes_per_tab: int = 10,
     ) -> None:
         """Initialize the crawler pipeline with dependencies.
 
@@ -161,6 +168,7 @@ class CrawlerPipeline:
             workers: Concurrency worker count.
             retry_skipped: Whether to operate in retry-skipped mode.
             retry_slugs: Slugs to retry if in retry_skipped mode.
+            max_cafes_per_tab: Max cafes to process before rotating tab.
         """
         self.loader = loader
         self.scraper = scraper
@@ -171,6 +179,7 @@ class CrawlerPipeline:
         self.workers = max(1, workers)
         self.retry_skipped = retry_skipped
         self.retry_slugs = retry_slugs or set()
+        self.max_cafes_per_tab = max(1, max_cafes_per_tab)
 
     async def _process_one(
         self, worker: ScraperWorker, cafe: CafeRecord
@@ -181,6 +190,7 @@ class CrawlerPipeline:
             worker: Assigned ScraperWorker.
             cafe: CafeRecord to process.
         """
+        await asyncio.sleep(0.5)
         target = self.resolver.resolve(cafe)
         reviews = await worker.scrape(target)
 
@@ -241,6 +251,7 @@ class CrawlerPipeline:
                 context=self.scraper.context,
                 worker_id=worker_id,
                 page_pool=self.scraper.page_pool,
+                max_cafes_per_tab=self.max_cafes_per_tab,
             )
             try:
                 while True:
@@ -324,6 +335,7 @@ async def _main_async(args: argparse.Namespace) -> int:
                     workers=args.workers,
                     retry_skipped=args.retry_skipped,
                     retry_slugs=retry_slugs,
+                    max_cafes_per_tab=args.max_cafes_per_tab,
                 )
                 await pipeline.run(limit=args.limit)
     except KeyboardInterrupt:

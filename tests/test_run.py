@@ -60,7 +60,11 @@ def test_parse_args_defaults() -> None:
     assert args.cdp_url == "http://localhost:9222"
     assert args.headful is False
     assert args.retry_skipped is False
+    assert args.max_cafes_per_tab == 10
     assert args.log_level == "INFO"
+
+    custom_args = parse_args(["--max-cafes-per-tab", "5"])
+    assert custom_args.max_cafes_per_tab == 5
 
 
 def test_parse_args_invalid_workers() -> None:

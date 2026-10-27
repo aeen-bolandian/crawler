@@ -317,7 +317,111 @@ async def test_scraper_falls_back_to_launch() -> None:
     assert mock_pw.stop.called
 
 
-# 4. Integration test (skipped by default)
+# 4. Tab rotation & crash recovery tests
+@pytest.mark.asyncio
+async def test_worker_rotate_tab() -> None:
+    """Verify _rotate_tab closes old page and initializes fresh page."""
+    pool: asyncio.Queue = asyncio.Queue()
+    old_page = MagicMock()
+    old_page.is_closed = MagicMock(return_value=False)
+    old_page.close = AsyncMock()
+
+    new_page = MagicMock()
+    new_page.goto = AsyncMock()
+    new_page.wait_for_timeout = AsyncMock()
+
+    mock_context = MagicMock()
+    mock_context.new_page = AsyncMock(return_value=new_page)
+
+    worker = ScraperWorker(
+        context=mock_context,
+        worker_id=1,
+        page_pool=pool,
+        max_cafes_per_tab=5,
+    )
+    worker._page = old_page
+    worker.cafes_processed_on_this_tab = 5
+    worker._needs_new_page = True
+
+    result_page = await worker._rotate_tab(old_page)
+
+    assert result_page == new_page
+    assert worker._page == new_page
+    assert worker.cafes_processed_on_this_tab == 0
+    assert worker._needs_new_page is False
+    assert worker._owns_page is True
+    assert old_page.close.called
+    new_page.goto.assert_awaited_once_with(
+        "https://www.google.com/maps",
+        timeout=worker.config.PAGE_LOAD_TIMEOUT_MS,
+        wait_until="commit",
+    )
+
+
+@pytest.mark.asyncio
+async def test_worker_auto_rotates_after_max_cafes(
+    sample_target: ResolvedTarget,
+) -> None:
+    """Verify worker rotates tab when cafes_processed reaches max_cafes_per_tab."""
+    pool: asyncio.Queue = asyncio.Queue()
+    mock_page = MagicMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    await pool.put(mock_page)
+
+    mock_context = MagicMock()
+    worker = ScraperWorker(
+        context=mock_context,
+        worker_id=1,
+        page_pool=pool,
+        max_cafes_per_tab=1,
+    )
+    worker._scrape_with_page = AsyncMock(return_value=[])
+    worker._rotate_tab = AsyncMock()
+
+    await worker.scrape(sample_target)
+
+    assert worker.cafes_processed_on_this_tab == 1
+    worker._rotate_tab.assert_awaited_once_with(mock_page)
+
+
+@pytest.mark.asyncio
+async def test_worker_recovers_from_crash(
+    sample_target: ResolvedTarget,
+) -> None:
+    """Verify crash marks _needs_new_page and rotates tab on next scrape."""
+    pool: asyncio.Queue = asyncio.Queue()
+    crashed_page = MagicMock()
+    crashed_page.is_closed = MagicMock(return_value=False)
+    crashed_page.url = "https://www.google.com/maps/search/test"
+    crashed_page.goto = AsyncMock(
+        side_effect=Exception("Page.goto: Page crashed")
+    )
+    await pool.put(crashed_page)
+
+    mock_context = MagicMock()
+    worker = ScraperWorker(
+        context=mock_context,
+        worker_id=2,
+        page_pool=pool,
+        max_cafes_per_tab=10,
+    )
+    worker._rotate_tab = AsyncMock()
+
+    # First scrape fails with crash
+    reviews = await worker.scrape(sample_target)
+    assert reviews == []
+    assert worker.last_skip_reason == SkipReason.EXCEPTION
+    assert worker._needs_new_page is True
+    assert worker.cafes_processed_on_this_tab == 1
+
+    # Second scrape triggers _rotate_tab due to _needs_new_page
+    worker._scrape_with_page = AsyncMock(return_value=[])
+    await worker.scrape(sample_target)
+    assert worker._rotate_tab.called
+    assert worker._needs_new_page is False
+
+
+# 5. Integration test (skipped by default)
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_scrape_real_google_maps() -> None:
