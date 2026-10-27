@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Google Maps Scraper Data & State
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+crawler_state*.json
+*.csv
+
+# Logs & Environment
+*.log
+.env
+.env.*
+
+# IDE / Editor
+.vscode/
+.idea/
