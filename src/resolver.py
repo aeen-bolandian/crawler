@@ -26,7 +26,6 @@ from src.db_loader import CafeRecord
 MAX_MATCH_DISTANCE_STRICT_M: float = 500.0
 MAX_MATCH_DISTANCE_LOOSE_M: float = 800.0
 
-# Regex patterns for coordinate extraction
 _RE_PAGE_URL_COORDS = re.compile(r"/@(-?\d+\.\d+),(-?\d+\.\d+)")
 _RE_HREF_COORDS = re.compile(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)")
 
@@ -111,6 +110,12 @@ def extract_coordinates_from_href(href: str) -> tuple[float, float] | None:
         return float(match.group(1)), float(match.group(2))
     except (ValueError, TypeError):
         return None
+
+
+# Aliases for scraper compatibility
+haversine_m = haversine_distance
+extract_coords_from_url = extract_coordinates_from_url
+extract_coords_from_href = extract_coordinates_from_href
 
 
 def _short_address(search_address: str, keep_tail: int = 3) -> str:
