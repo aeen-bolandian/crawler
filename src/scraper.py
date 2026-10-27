@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import re
+import time
 from typing import Optional
 
 from playwright.async_api import (
@@ -64,7 +65,7 @@ class ScraperConfig:
     SEL_RESULT_LINK: str = "a[href*='/maps/place/']"
 
     # Timeouts in milliseconds
-    PAGE_LOAD_TIMEOUT_MS: int = 30_000
+    PAGE_LOAD_TIMEOUT_MS: int = 15_000
     POST_GOTO_SETTLE_MS: int = 5_000
     POST_TAB_CLICK_SETTLE_MS: int = 2_000
     POST_MORE_EXPAND_SETTLE_MS: int = 300
@@ -355,6 +356,7 @@ class ScraperWorker:
             self._last_skip_reason = SkipReason.EXCEPTION
             return []
 
+        t0 = time.monotonic()
         try:
             return await self._scrape_with_page(page, target)
         except Exception as err:
@@ -363,16 +365,27 @@ class ScraperWorker:
             )
             self._last_skip_reason = SkipReason.EXCEPTION
             return []
+        finally:
+            logger.debug(
+                f"[w{self.worker_id}][{target.cafe.id}] scrape() took "
+                f"{time.monotonic() - t0:.1f}s"
+            )
 
     async def _scrape_with_page(
         self, page: Page, target: ResolvedTarget
     ) -> list[ReviewRecord]:
         """Internal scraping routine after obtaining page."""
         try:
+            logger.debug(
+                f"[w{self.worker_id}][{target.cafe.id}] goto START: {target.url}"
+            )
             await page.goto(
                 target.url,
                 timeout=self.config.PAGE_LOAD_TIMEOUT_MS,
-                wait_until="domcontentloaded",
+                wait_until="commit",
+            )
+            logger.debug(
+                f"[w{self.worker_id}][{target.cafe.id}] goto DONE: {page.url}"
             )
         except Exception as err:
             logger.warning(
@@ -389,19 +402,35 @@ class ScraperWorker:
             return []
 
         await self._dismiss_consent(page)
+        logger.debug(
+            f"[w{self.worker_id}][{target.cafe.id}] consent dismissed"
+        )
         await page.wait_for_timeout(self.config.POST_GOTO_SETTLE_MS)
+        logger.debug(
+            f"[w{self.worker_id}][{target.cafe.id}] post-goto settle done"
+        )
 
         # Detect whether we are on a single place page or search results list
         is_place = False
+        logger.debug(f"[w{self.worker_id}][{target.cafe.id}] checking h1")
         try:
             h1_el = page.locator(self.config.SEL_PLACE_H1).first
             if await h1_el.is_visible(timeout=1000):
                 is_place = True
         except Exception:
             pass
+        logger.debug(
+            f"[w{self.worker_id}][{target.cafe.id}] is_place={is_place}"
+        )
 
         result_links = page.locator(self.config.SEL_RESULT_LINK)
+        logger.debug(
+            f"[w{self.worker_id}][{target.cafe.id}] counting result links"
+        )
         link_count = await result_links.count()
+        logger.debug(
+            f"[w{self.worker_id}][{target.cafe.id}] result links: {link_count}"
+        )
 
         if not is_place and link_count == 0:
             self._last_skip_reason = SkipReason.PAGE_SIGNAL_NONE
@@ -447,6 +476,11 @@ class ScraperWorker:
                 self._last_skip_reason = SkipReason.PAGE_NAV_FAILED
                 return []
 
+        if is_place:
+            logger.debug(
+                f"[w{self.worker_id}][{target.cafe.id}] validating place match"
+            )
+
         # Validate venue on single place view
         page_coords = extract_coords_from_url(page.url)
         if (
@@ -484,6 +518,9 @@ class ScraperWorker:
                 pass
 
         # Click reviews tab
+        logger.debug(
+            f"[w{self.worker_id}][{target.cafe.id}] clicking reviews tab"
+        )
         clicked = await self._click_reviews_tab(page)
         if not clicked:
             self._last_skip_reason = SkipReason.REVIEWS_TAB_FAILED
