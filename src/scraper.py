@@ -317,27 +317,100 @@ class ScraperWorker:
             except Exception:
                 pass
 
-    async def _click_reviews_tab(self, page: Page) -> bool:
-        """Attempt clicking the reviews tab with fallback selectors."""
-        for _ in range(2):
-            try:
-                tab = page.locator(self.config.SEL_REVIEWS_TAB).first
-                if await tab.is_visible(timeout=1000):
-                    await tab.click()
-                    return True
-            except Exception:
-                pass
-            await page.wait_for_timeout(300)
+    async def _click_reviews_tab(
+        self, page: Page, target: Optional[ResolvedTarget] = None
+    ) -> bool:
+        """Attempt clicking the reviews tab with timeout and fallback selectors."""
+        cafe_id = target.cafe.id if target and target.cafe else ""
+        logger.debug(f"[w{self.worker_id}][{cafe_id}] waiting for Reviews tab")
 
-        # Fallback last-resort selector
+        tab_el = None
         try:
-            fallback = page.locator(self.config.SEL_REVIEWS_TAB_FALLBACK).first
-            if await fallback.is_visible(timeout=1000):
-                await fallback.click()
+            tab_el = await page.wait_for_selector(
+                self.config.SEL_REVIEWS_TAB,
+                timeout=10_000,
+                state="visible",
+            )
+        except Exception:
+            try:
+                tab_el = await page.wait_for_selector(
+                    self.config.SEL_REVIEWS_TAB_FALLBACK,
+                    timeout=3_000,
+                    state="visible",
+                )
+            except Exception:
+                tab_el = None
+
+        if tab_el is None:
+            logger.warning(
+                f"[w{self.worker_id}][{cafe_id}] Reviews tab not found within 10s"
+            )
+            return False
+
+        try:
+            is_selected = await tab_el.get_attribute("aria-selected") == "true"
+            if is_selected:
+                logger.debug(
+                    f"[w{self.worker_id}][{cafe_id}] Reviews tab already selected"
+                )
                 return True
         except Exception:
             pass
-        return False
+
+        logger.debug(
+            f"[w{self.worker_id}][{cafe_id}] Reviews tab found, clicking"
+        )
+        try:
+            await tab_el.click(timeout=5_000)
+            logger.debug(
+                f"[w{self.worker_id}][{cafe_id}] Reviews tab clicked"
+            )
+            return True
+        except Exception as err:
+            logger.warning(
+                f"[w{self.worker_id}][{cafe_id}] Reviews tab click failed: {err}"
+            )
+            return False
+
+    async def _wait_for_review_cards(
+        self, page: Page, target: Optional[ResolvedTarget] = None
+    ) -> bool:
+        """Wait for review card elements to be attached in DOM."""
+        cafe_id = target.cafe.id if target and target.cafe else ""
+        logger.debug(f"[w{self.worker_id}][{cafe_id}] waiting for review cards")
+        try:
+            await page.wait_for_selector(
+                self.config.SEL_REVIEW_ITEM,
+                timeout=self.config.REVIEW_CARDS_WAIT_MS,
+                state="attached",
+            )
+            count = await page.locator(self.config.SEL_REVIEW_ITEM).count()
+            logger.debug(
+                f"[w{self.worker_id}][{cafe_id}] review cards appeared: "
+                f"{count} cards"
+            )
+            return True
+        except Exception:
+            try:
+                await page.wait_for_selector(
+                    self.config.SEL_REVIEW_ITEM_FALLBACK,
+                    timeout=3_000,
+                    state="attached",
+                )
+                count = await page.locator(
+                    self.config.SEL_REVIEW_ITEM_FALLBACK
+                ).count()
+                logger.debug(
+                    f"[w{self.worker_id}][{cafe_id}] review cards appeared: "
+                    f"{count} cards"
+                )
+                return True
+            except Exception:
+                logger.warning(
+                    f"[w{self.worker_id}][{cafe_id}] review cards timeout after "
+                    f"{self.config.REVIEW_CARDS_WAIT_MS}ms"
+                )
+                return False
 
     async def scrape(self, target: ResolvedTarget) -> list[ReviewRecord]:
         """Scrape reviews for a resolved cafe target.
@@ -518,10 +591,17 @@ class ScraperWorker:
                 pass
 
         # Click reviews tab
-        logger.debug(
-            f"[w{self.worker_id}][{target.cafe.id}] clicking reviews tab"
-        )
-        clicked = await self._click_reviews_tab(page)
+        try:
+            clicked = await asyncio.wait_for(
+                self._click_reviews_tab(page, target), timeout=15.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[w{self.worker_id}][{target.cafe.id}] "
+                "click_reviews_tab hard timeout"
+            )
+            clicked = False
+
         if not clicked:
             self._last_skip_reason = SkipReason.REVIEWS_TAB_FAILED
             return []
@@ -529,21 +609,24 @@ class ScraperWorker:
         await page.wait_for_timeout(self.config.POST_TAB_CLICK_SETTLE_MS)
 
         # Wait for review cards to appear
-        cards_loc = page.locator(self.config.SEL_REVIEW_ITEM)
         try:
-            await page.wait_for_selector(
-                self.config.SEL_REVIEW_ITEM,
-                timeout=self.config.REVIEW_CARDS_WAIT_MS,
+            cards_ready = await asyncio.wait_for(
+                self._wait_for_review_cards(page, target), timeout=25.0
             )
-        except Exception:
-            try:
-                await page.wait_for_selector(
-                    self.config.SEL_REVIEW_ITEM_FALLBACK, timeout=3000
-                )
-                cards_loc = page.locator(self.config.SEL_REVIEW_ITEM_FALLBACK)
-            except Exception:
-                self._last_skip_reason = SkipReason.REVIEW_CARDS_MISSING
-                return []
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[w{self.worker_id}][{target.cafe.id}] "
+                "wait_for_review_cards hard timeout"
+            )
+            cards_ready = False
+
+        if not cards_ready:
+            self._last_skip_reason = SkipReason.REVIEW_CARDS_MISSING
+            return []
+
+        cards_loc = page.locator(self.config.SEL_REVIEW_ITEM)
+        if await cards_loc.count() == 0:
+            cards_loc = page.locator(self.config.SEL_REVIEW_ITEM_FALLBACK)
 
         # Scroll reviews container
         feed = page.locator(self.config.SEL_FEED).first
