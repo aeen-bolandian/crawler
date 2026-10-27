@@ -206,6 +206,24 @@ async def test_worker_scrape_success(sample_target: ResolvedTarget) -> None:
     feed_loc = AsyncMock()
     feed_loc.evaluate = AsyncMock()
 
+    async def mock_evaluate(js: str, *args: object) -> object:
+        if "extract_js" in js or "const out = [];" in js:
+            return [
+                {
+                    "author": "Maryam",
+                    "rating": "5 stars",
+                    "date": "yesterday",
+                    "text": "Amazing coffee!",
+                }
+            ]
+        elif "maxIter" in js:
+            return {"count": 1}
+        elif "btns" in js:
+            return 0
+        return 0
+
+    mock_page.evaluate = AsyncMock(side_effect=mock_evaluate)
+
     def page_locator(sel: str) -> MagicMock:
         loc = MagicMock()
         if sel == "h1":

@@ -74,9 +74,9 @@ class ScraperConfig:
 
     # Scrolling parameters
     SCROLL_STEP_PX: int = 3_000
-    SCROLL_MAX_ITERATIONS: int = 25
-    SCROLL_WAIT_FOR_NEW_CARD_MS: int = 2_500
-    SCROLL_MAX_STAGNANT: int = 3
+    SCROLL_MAX_ITERATIONS: int = 10
+    SCROLL_WAIT_FOR_NEW_CARD_MS: int = 1_500
+    SCROLL_MAX_STAGNANT: int = 2
 
     # Results to inspect
     MAX_RESULTS_TO_TRY: int = 20
@@ -624,29 +624,48 @@ class ScraperWorker:
             self._last_skip_reason = SkipReason.REVIEW_CARDS_MISSING
             return []
 
-        cards_loc = page.locator(self.config.SEL_REVIEW_ITEM)
-        if await cards_loc.count() == 0:
-            cards_loc = page.locator(self.config.SEL_REVIEW_ITEM_FALLBACK)
-
-        # Scroll reviews container
-        feed = page.locator(self.config.SEL_FEED).first
+        # === JS-BASED SCROLL ===
+        logger.debug(
+            f"[w{self.worker_id}][{target.cafe.id}] starting JS scroll"
+        )
+        scroll_js = """
+            (maxIter) => {
+                const cards = document.querySelectorAll(
+                    'div.jftiEf, div[data-review-id]'
+                );
+                if (cards.length === 0) return {count: 0};
+                let el = cards[0].parentElement;
+                while (el && el.scrollHeight <= el.clientHeight + 4) {
+                    el = el.parentElement;
+                }
+                if (!el) return {count: cards.length};
+                el.scrollTop = el.scrollHeight;
+                return {count: cards.length};
+            }
+        """
+        last_count = 0
         stagnant = 0
-        last_count = await cards_loc.count()
-
-        for _ in range(self.config.SCROLL_MAX_ITERATIONS):
-            if last_count >= self.max_reviews:
-                break
+        for i in range(self.config.SCROLL_MAX_ITERATIONS):
             try:
-                await feed.evaluate(
-                    "(el, px) => el.scrollTop += px", self.config.SCROLL_STEP_PX
+                result = await page.evaluate(
+                    scroll_js, self.config.SCROLL_MAX_ITERATIONS
                 )
-            except Exception:
-                try:
-                    await page.mouse.wheel(0, self.config.SCROLL_STEP_PX)
-                except Exception:
-                    pass
+            except Exception as err:
+                logger.debug(
+                    f"[w{self.worker_id}][{target.cafe.id}] "
+                    f"scroll eval failed: {err}"
+                )
+                break
             await page.wait_for_timeout(self.config.SCROLL_WAIT_FOR_NEW_CARD_MS)
-            new_count = await cards_loc.count()
+            new_count = (
+                result.get("count", 0) if isinstance(result, dict) else 0
+            )
+            logger.debug(
+                f"[w{self.worker_id}][{target.cafe.id}] "
+                f"scroll iter {i}: {new_count} cards"
+            )
+            if new_count >= self.max_reviews:
+                break
             if new_count == last_count:
                 stagnant += 1
                 if stagnant >= self.config.SCROLL_MAX_STAGNANT:
@@ -655,62 +674,97 @@ class ScraperWorker:
                 stagnant = 0
                 last_count = new_count
 
-        # Expand "More" buttons
+        # === JS-BASED EXPAND "MORE" ===
+        logger.debug(
+            f"[w{self.worker_id}][{target.cafe.id}] expanding More buttons"
+        )
+        expand_js = """
+            () => {
+                const btns = document.querySelectorAll(
+                    'button.w8nwRe.kyuRq, button[aria-label*="More" i], ' +
+                    'button[aria-label*="بیشتر" i]'
+                );
+                let n = 0;
+                for (const b of btns) {
+                    try { b.click(); n++; } catch(e) {}
+                }
+                return n;
+            }
+        """
         try:
-            more_buttons = await page.locator(self.config.SEL_MORE_BUTTON).all()
-            for btn in more_buttons:
-                try:
-                    if await btn.is_visible():
-                        await btn.click()
-                        await page.wait_for_timeout(
-                            self.config.POST_MORE_EXPAND_SETTLE_MS
-                        )
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            expanded = await page.evaluate(expand_js)
+            logger.debug(
+                f"[w{self.worker_id}][{target.cafe.id}] "
+                f"expanded {expanded} More buttons"
+            )
+        except Exception as err:
+            logger.debug(
+                f"[w{self.worker_id}][{target.cafe.id}] expand failed: {err}"
+            )
+        await page.wait_for_timeout(self.config.POST_MORE_EXPAND_SETTLE_MS)
 
-        # Extract reviews
-        cards = await cards_loc.all()
+        # === JS-BASED EXTRACTION ===
+        logger.debug(
+            f"[w{self.worker_id}][{target.cafe.id}] extracting reviews via JS"
+        )
+        extract_js = """
+            (max) => {
+                const cards = document.querySelectorAll(
+                    'div.jftiEf, div[data-review-id]'
+                );
+                const out = [];
+                for (const card of cards) {
+                    if (out.length >= max) break;
+                    const author = (
+                        card.querySelector('.d4r55')?.innerText || ''
+                    ).trim();
+                    const ratingEl = card.querySelector(
+                        'span[role="img"][aria-label*="star" i], ' +
+                        'span[role="img"][aria-label*="ستاره" i]'
+                    );
+                    const rating = ratingEl?.getAttribute('aria-label') || '';
+                    const date = (
+                        card.querySelector('span.rsqaWe')?.innerText || ''
+                    ).trim();
+                    const text = (
+                        card.querySelector('span.wiI7pd')?.innerText || ''
+                    ).trim();
+                    out.push({author, rating, date, text});
+                }
+                return out;
+            }
+        """
+        try:
+            raw = await page.evaluate(extract_js, self.max_reviews)
+        except Exception as err:
+            logger.warning(
+                f"[w{self.worker_id}][{target.cafe.id}] extraction failed: {err}"
+            )
+            raw = []
+
         reviews: list[ReviewRecord] = []
-        for card in cards[: self.max_reviews]:
-            author = ""
-            try:
-                author = await card.locator(self.config.SEL_AUTHOR).first.inner_text()
-            except Exception:
-                pass
-
-            rating = ""
-            try:
-                r_el = card.locator(self.config.SEL_RATING).first
-                rating = await r_el.get_attribute("aria-label") or ""
-            except Exception:
-                pass
-
-            date = ""
-            try:
-                date = await card.locator(self.config.SEL_DATE).first.inner_text()
-            except Exception:
-                pass
-
-            text = ""
-            try:
-                text = await card.locator(self.config.SEL_TEXT).first.inner_text()
-            except Exception:
-                pass
-
+        for item in raw:
+            author = (item.get("author") or "").strip() or "Anonymous"
+            rating = (item.get("rating") or "").strip()
+            date = (item.get("date") or "").strip()
+            text = " ".join((item.get("text") or "").splitlines()).strip()
             if author or text or rating:
                 reviews.append(
                     ReviewRecord(
                         cafe_slug=target.cafe.slug,
                         cafe_name=target.cafe.name,
                         city=target.cafe.city,
-                        author=author.strip(),
-                        rating=rating.strip(),
-                        date=date.strip(),
-                        text=text.strip(),
+                        author=author,
+                        rating=rating,
+                        date=date,
+                        text=text,
                     )
                 )
+
+        logger.debug(
+            f"[w{self.worker_id}][{target.cafe.id}] "
+            f"extracted {len(reviews)} reviews"
+        )
 
         if not reviews:
             self._last_skip_reason = SkipReason.NO_REVIEWS
