@@ -1,231 +1,297 @@
 # Google Maps Review Scraper
 
-An asynchronous, resumable, Playwright-based scraper for Google Maps cafe reviews. It attaches to an existing Google Chrome debugging session via Chrome DevTools Protocol (CDP) to preserve active logins, uses tab pooling to prevent blank page loads, validates venues by coordinates and Persian↔Latin transliteration, and exports reviews into Excel-compatible CSVs.
+Async, resumable, Playwright-based scraper for extracting Google Maps reviews from cafes stored in a SQLite database. Attaches to an existing Chrome debug session via CDP to preserve your logged-in Google account, validates results by coordinates to avoid scraping the wrong cafe, and streams reviews to CSV.
 
 ---
 
 ## Features
 
-- **Async Multi-Worker Scraping**: Spawns $N$ concurrent workers sharing a unified cafe queue and tab pool.
-- **CDP-Based Browser Automation**: Attaches to a running Chrome instance (`--remote-debugging-port=9222`), preserving authenticated Google sessions and avoiding automated bot detection.
-- **Tab Pooling**: Reuses existing user-opened Maps tabs from an `asyncio.Queue` tab pool to circumvent CDP blank page creation issues.
-- **Strict Coordinate Validation**: Matches venues using Haversine distance (500m strict threshold for page URLs, 800m loose threshold for search result hrefs).
-- **Persian↔Latin Transliteration Fallback**: Normalizes Persian characters, maps architectural tokens (e.g., "عمارت" ↔ "Mansion"), and uses phonetic matching when coordinates are absent.
-- **Resumable Checkpointing**: Tracks state in `crawler_state.json` via batched atomic writes (`os.replace`), only recording cafes with $\ge 1$ review.
-- **Skip Reporting**: Records un-scraped venues and exact error/skip reasons to `data/skipped_cafes.csv`.
-- **Targeted Retry Mode**: Supports `--retry-skipped` with `--skipped-input` to re-attempt failed venues without rescraping completed ones.
-- **Excel-Compatible CSV Export**: Streams reviews safely under an `asyncio.Lock` using `utf-8-sig` encoding (UTF-8 with BOM) and collapsed newlines.
+- **Async multi-worker scraping** — N concurrent workers share a cafe queue
+- **CDP-based** — attaches to Chrome via `--remote-debugging-port=9222`; preserves the logged-in Google session
+- **Tab pooling** — reuses user-opened Maps tabs (avoids blank-page problem in CDP)
+- **Coordinate validation** — haversine check with 500 m strict / 800 m loose thresholds
+- **Persian ↔ Latin name fallback** — cross-script name matching when coordinates are unavailable
+- **Resumable checkpointing** — only cafes with ≥ 1 review are marked processed
+- **Skip reporting** — every skipped cafe recorded with a reason code (`data/skipped_cafes.csv`)
+- **Retry mode** — `--retry-skipped` re-attempts only previously failed cafes
+- **CSV output** — UTF-8 with BOM for Excel compatibility
 
 ---
 
 ## Prerequisites
 
-1. **Python 3.10+** installed on Linux / macOS / Windows.
-2. **Google Chrome** installed.
-3. **Google Account** logged in to Google Maps in Chrome.
-4. **Active Chrome Debug Session**:
-   Launch Chrome with remote debugging and a dedicated profile directory:
-   ```bash
-   google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug-crawler
-   ```
-5. **Open Tabs**:
-   In that opened Chrome window, navigate to `https://www.google.com/maps` and open exactly $N$ tabs (where $N$ equals your `--workers` count, default 4). Log in to your Google account in this window.
+- **Python** 3.10+
+- **Google Chrome** installed
+- **A Google account** logged into Google Maps (Maps shows "Limited View" to anonymous users)
+- **Chrome debug session** started manually before running the scraper
+- **N Maps tabs open** in that Chrome (N = `--workers`)
 
 ---
 
 ## Installation
 
-1. Create and activate a Python virtual environment:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+```
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+---
 
-3. Install Playwright Chromium browser binaries (for fallback execution):
-   ```bash
-   playwright install chromium
-   ```
+## Chrome Debug Setup (REQUIRED)
+
+The scraper attaches to a running Chrome instance. You must start Chrome in debug mode first.
+
+### 1. Close all regular Chrome windows
+
+```bash
+pkill -f chrome || true
+sleep 2
+```
+
+### 2. Launch Chrome with debug port
+
+```bash
+google-chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir=/tmp/chrome-debug-gmap &
+```
+
+### 3. In that Chrome window
+
+1. Log in to a Google account.
+2. Open exactly N tabs at `https://www.google.com/maps` (N = `--workers`, default 4).
+3. Wait until each map is fully visible (not a blank page, not a consent page).
+4. Leave the tabs open — the crawler reuses them.
+
+### 4. Verify CDP is reachable
+
+```bash
+curl -s http://localhost:9222/json/version
+```
+
+You should see JSON with `"Browser": "Chrome/..."`.
 
 ---
 
 ## Usage
 
-### 1. Basic Execution
-Scrape approved cafes from `cafes_cafe.db` using 4 concurrent workers:
+### Basic crawl (all approved cafes, 4 workers)
+
 ```bash
 python run.py --db cafes_cafe.db --workers 4
 ```
 
-### 2. Limit Number of Cafes
-Process only the first 50 pending cafes:
+### Crawl with a limit
+
 ```bash
 python run.py --db cafes_cafe.db --workers 4 --limit 50
 ```
 
-### 3. Automatically Resume
-Interrupted runs resume seamlessly without duplicate scrapes (already completed cafes in `crawler_state.json` are skipped):
+### Resume automatically (state is preserved)
+
 ```bash
-python run.py --db cafes_cafe.db
+python run.py --db cafes_cafe.db --workers 4
+# picks up where it left off based on crawler_state.json
 ```
 
-### 4. Retry Previously Skipped Cafes
-Target only cafes logged in the skip report:
+### Retry only skipped cafes
+
 ```bash
-python run.py --retry-skipped --skipped-input data/skipped_cafes.csv
+python run.py --db cafes_cafe.db --workers 4 \
+  --retry-skipped \
+  --skipped-input data/skipped_cafes.csv
 ```
 
-### 5. Custom CDP Endpoint
-Attach to Chrome running on an alternate debugging port:
+### Custom CDP endpoint
+
 ```bash
-python run.py --cdp-url http://localhost:9223
+python run.py --db cafes_cafe.db --workers 4 \
+  --cdp-url http://localhost:9223
 ```
 
 ---
 
-## CLI Flags Reference
+## CLI Reference
 
 | Flag | Default | Description |
-|------|---------|-------------|
-| `--db` | `cafes_cafe.db` | Path to read-only SQLite database file |
-| `--output` | `data/google_reviews.csv` | Destination CSV file for scraped reviews |
-| `--state` | `crawler_state.json` | JSON checkpoint file tracking completed slugs |
-| `--skipped` | `data/skipped_cafes.csv` | CSV report path for logging skipped cafes |
-| `--skipped-input` | `None` | Source skip CSV file when running in `--retry-skipped` mode |
-| `--limit` | `None` | Maximum number of cafes to process during this execution |
-| `--workers` | `4` | Number of concurrent workers (must equal open Maps tabs) |
-| `--cdp-url` | `http://localhost:9222` | Chrome DevTools Protocol remote debugging endpoint |
-| `--headful` | `False` | Run headful browser if local Chromium launch fallback occurs |
-| `--retry-skipped` | `False` | Restrict processing exclusively to slugs from `--skipped-input` |
-| `--log-level` | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+|---|---|---|
+| `--db` | `cafes_cafe.db` | SQLite database path (read-only) |
+| `--output` | `data/google_reviews.csv` | Output CSV path |
+| `--state` | `crawler_state.json` | Checkpoint state JSON |
+| `--skipped` | `data/skipped_cafes.csv` | Skip report CSV |
+| `--skipped-input` | `None` | Input CSV for `--retry-skipped` mode |
+| `--limit` | `None` | Max cafes this run |
+| `--workers` | `4` | Concurrent workers (must equal open Maps tabs) |
+| `--cdp-url` | `http://localhost:9222` | Chrome debug endpoint |
+| `--headful` | `False` | Use headful browser if CDP fails |
+| `--retry-skipped` | `False` | Only retry cafes from `--skipped-input` |
+| `--log-level` | `INFO` | Logging verbosity (DEBUG/INFO/WARNING/ERROR) |
 
 ---
 
 ## Output Schema
 
-### 1. Reviews Data (`data/google_reviews.csv`)
-Encoded in UTF-8 with BOM (`utf-8-sig`) with collapsed newlines for full Microsoft Excel compatibility:
-- `cafe_slug`: Unique slug identifier from SQLite.
-- `cafe_name`: Name of the cafe.
-- `city`: City location.
-- `author`: Reviewer display name.
-- `rating`: Rating string (e.g. `5 stars`).
-- `date`: Relative or absolute review post date.
-- `text`: Review text content with whitespace and newlines collapsed.
+### `data/google_reviews.csv`
 
-### 2. Skipped Venues Report (`data/skipped_cafes.csv`)
-- `cafe_id`: Numeric database primary key.
-- `cafe_slug`: Unique cafe slug.
-- `cafe_name`: Venue name.
-- `reason`: Machine-readable reason code from `SkipReason` (e.g. `place_coords_mismatch`, `zero_reviews`).
+| Column | Example |
+|---|---|
+| `cafe_slug` | `1e11ca0c-976e-4aad-a651-b9c68852f16a` |
+| `cafe_name` | `عمارت نیلی` |
+| `city` | `تهران` |
+| `author` | `Ali S. M` |
+| `rating` | `5 stars` |
+| `date` | `2 months ago` |
+| `text` | Full review body (newlines collapsed) |
 
-### 3. Checkpoint State (`crawler_state.json`)
-Atomic JSON dictionary flushed periodically and upon clean shutdown:
+### `data/skipped_cafes.csv`
+
+| Column | Example |
+|---|---|
+| `cafe_id` | `188` |
+| `cafe_slug` | `1e11ca0c-...` |
+| `cafe_name` | `عمارت نیلی` |
+| `reason` | `place_name_mismatch` |
+
+**Skip reasons:** `no_page_signal`, `no_result_matched_within_threshold`, `place_coords_mismatch`, `place_name_mismatch`, `reviews_tab_could_not_be_clicked`, `review_cards_never_appeared`, `navigation_to_result_url_failed`, `exception`, `zero_reviews`.
+
+### `crawler_state.json`
+
 ```json
-{
-  "processed_slugs": [
-    "cafe-bahar",
-    "cafe-nili",
-    "cafe-tehran"
-  ]
-}
+{"processed_slugs": ["slug1", "slug2", ...]}
 ```
 
 ---
 
 ## Project Structure
 
-```text
+```
 gmap-antigravity/
+├── AGENTS.md                    # Antigravity project rules
 ├── .agents/
-│   └── rules/                # System agent rules and linters
-├── AGENTS.md                 # Project architecture standards
-├── data/                     # Ignored output directory
-│   ├── google_reviews.csv    # Scraped customer reviews
-│   └── skipped_cafes.csv     # Skip and failure report
-├── logs/                     # Rotating crawler log files
+│   ├── rules/                   # Conditional rules (glob-based)
+│   └── skills/                  # Multi-step workflows
+├── README.md
+├── requirements.txt
+├── pytest.ini
+├── .gitignore
 ├── src/
-│   ├── __init__.py           # Package marker
-│   ├── db_loader.py          # Read-only SQLite database loader
-│   ├── exporter.py           # Async-safe CSV exporter with BOM
-│   ├── resolver.py           # Search query builder and coordinate math
-│   ├── scraper.py            # Playwright CDP tab pool and review extractor
-│   ├── skip_reporter.py      # Skipped venue tracking and reload
-│   └── state.py              # Batched atomic state checkpointing
-├── tests/
-│   ├── __init__.py           # Test package marker
-│   ├── test_db_loader.py     # SQLite loader tests
-│   ├── test_exporter.py      # CSV exporter concurrency tests
-│   ├── test_resolver.py      # Query resolution and coordinate tests
-│   ├── test_run.py           # CLI orchestrator tests
-│   ├── test_scraper.py       # Scraper unit and CDP fallback tests
-│   ├── test_skip_reporter.py # Skip reporting tests
-│   └── test_state.py         # Checkpointing and atomic write tests
-├── .gitignore                # Git ignore rules
-├── pytest.ini                # Pytest configuration
-├── requirements.txt          # Python dependencies
-├── run.py                    # CLI orchestrator entrypoint
-└── README.md                 # Project documentation
+│   ├── __init__.py
+│   ├── db_loader.py             # SQLite loader -> CafeRecord
+│   ├── resolver.py              # builds Google Maps URLs + coords validation
+│   ├── exporter.py              # CSV streaming exporter
+│   ├── state.py                 # checkpointing
+│   ├── skip_reporter.py         # skip CSV
+│   └── scraper.py               # Playwright-based scraper
+├── run.py                       # CLI orchestrator
+└── tests/
+    ├── test_db_loader.py
+    ├── test_resolver.py
+    ├── test_exporter.py
+    ├── test_state.py
+    ├── test_skip_reporter.py
+    ├── test_scraper.py
+    └── test_run.py
 ```
 
 ---
 
 ## Testing
 
-Run the full automated test suite using `pytest`:
+Run the full unit test suite (no browser or network required):
+
 ```bash
 ./.venv/bin/pytest tests/ -v
 ```
 
-The test suite includes 81 unit tests that run completely offline without needing a browser or network access:
-- **`test_db_loader.py`**: SQLite schema validation, read-only mode, and optional columns.
-- **`test_resolver.py`**: Address trimming, Persian stop word removal, Haversine formula, and coordinate regex.
-- **`test_exporter.py`**: UTF-8 BOM encoding, CSV row escaping, newline collapsing, and concurrent appends.
-- **`test_state.py`**: Batched threshold writes, corruption handling, and atomic replacements (`os.replace`).
-- **`test_skip_reporter.py`**: Skip CSV generation and slug re-loading for retry mode.
-- **`test_scraper.py`**: Transliteration matching, tab acquisition/release, coordinate validation, and selector fallbacks.
-- **`test_run.py`**: Argument parsing, limit constraints, worker loops, and cancellation handling.
+Run the integration test (requires Chrome debug on port 9222):
 
-To run the live integration test (requires a running Chrome debug session on port 9222):
 ```bash
 ./.venv/bin/pytest -m integration tests/
 ```
 
+**Coverage:** 81 unit tests passing, 1 integration test (skipped by default).
+
 ---
 
-## Architecture & Design Notes
+## Architecture Notes
 
-1. **Pipeline Lifecycle**:
-   `DatabaseLoader` queries approved cafes $\rightarrow$ `LocationResolver` constructs primary and fallback URLs $\rightarrow$ `CrawlerPipeline` dispatches tasks across `ScraperWorker`s via the tab pool $\rightarrow$ `CSVExporter` streams reviews under `asyncio.Lock` $\rightarrow$ `StateManager` flushes processed slugs.
-2. **Tab Pool Management**:
-   Playwright's `context.new_page()` frequently yields blank pages when attached to Chrome over CDP. `GoogleMapsScraper` populates an `asyncio.Queue` with user-opened Maps tabs and recycles them safely between workers.
-3. **Two-Tier Validation**:
-   - Primary: Haversine distance $\le 500\text{m}$ for page URLs, $\le 800\text{m}$ for search result links.
-   - Fallback: Persian Unicode normalization and phonetic transliteration matching for venues lacking GPS coordinates.
-4. **Rate Limit Resilience**:
-   Detects `google.com/sorry` redirects and pauses gracefully. Google typically throttles review requests after ~50 venues per IP address. If rate-limited, terminate with `Ctrl+C`, wait 30–60 minutes, and resume by re-running `python run.py --db cafes_cafe.db`.
+### Pipeline flow
+
+```
+DatabaseLoader
+      ↓ (CafeRecord)
+LocationResolver
+      ↓ (ResolvedTarget with URL + fallbacks)
+ScraperWorker (×N)  ←── claims Page from tab pool
+      ↓ (List[ReviewRecord])
+CSVExporter
+      ↓
+data/google_reviews.csv
+```
+
+### Validation strategy
+
+Three independent gates. If any passes, the place is accepted:
+
+1. **Clicked-result coordinates** — the `href` of a search result carries exact place coords in `!3d...!4d...`. Compared with DB coords using haversine. Threshold: **800 m**.
+2. **Page-URL coordinates** — after navigation, `window.location.href` contains `/@lat,lng`. Threshold: **500 m** (stricter because the URL is authoritative).
+3. **Name fallback** — if no coordinates available, compare normalized names with Persian↔Latin transliteration + n-gram matching.
+
+If none pass, the cafe is skipped and logged with a reason code.
+
+### Checkpointing
+
+Only cafes with **≥ 1 extracted review** are added to `crawler_state.json`. This means:
+
+- Interrupting with `Ctrl+C` never loses progress.
+- Failed cafes are retried on the next run by default.
+- To avoid re-attempting failed cafes every run, use `--retry-skipped` with an explicit `--skipped-input`.
+
+### Rate limit awareness
+
+Google aggressively rate-limits Maps scraping. Signs:
+
+- Many `page.goto` timeouts in a row
+- Tabs redirect to `https://www.google.com/sorry/...`
+- Success rate drops below 30 %
+
+**Recovery:**
+
+1. `Ctrl+C` to stop (state is preserved).
+2. Wait 30–60 minutes.
+3. Close affected tabs, open 4 fresh Maps tabs.
+4. Resume with the same command.
+
+For large runs, split the database into shards and run on multiple IPs (each machine gets its own rate-limit quota).
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Cause | Solution |
-|---------|-------|----------|
-| CDP endpoint unreachable | Chrome debug session is not running | Start Chrome with `google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug-crawler` |
-| Tabs load blank | Missing pre-opened Google Maps tabs | Open $N$ tabs navigating to `https://www.google.com/maps` in the debug Chrome window, then restart `run.py` |
-| Rate limiting / timeouts | Google IP throttling (`google.com/sorry`) | Press `Ctrl+C` to cleanly flush state, wait 30–60 minutes, and resume execution |
-| Venue skipped / no result matched | Inaccurate address or venue not found on Maps | Inspect `data/skipped_cafes.csv` to review the skip reason code |
+| Symptom | Cause | Fix |
+|---|---|---|
+| `CDP endpoint unreachable` | Chrome debug not running | Start Chrome with `--remote-debugging-port=9222` |
+| Tabs load blank | Forgot to open Maps tabs first | Open N tabs, restart crawl |
+| Rate limit (timeouts) | Google throttling | `Ctrl+C`, wait 30–60 min, resume |
+| `No result matched` | Bad address or place missing from Maps | Check `data/skipped_cafes.csv` |
+| `Page pool empty` warning | Fewer tabs than `--workers` | Open more tabs or lower `--workers` |
+| Extremely slow per cafe (> 30 s) | `wait_until="domcontentloaded"` hangs on SPA | Ensure `wait_until="commit"` in `_scrape_with_page` |
+| `google.com/sorry` in tab URL | Captcha triggered | Solve manually in Chrome, wait 15 min |
 
 ---
 
 ## Development Conventions
 
-- Strictly complies with PEP 8 and line lengths $\le 88$.
-- Full type annotations on all function and method signatures.
-- Detailed docstrings adhering to PEP 257.
-- Loguru logging throughout (`logger.info`, `logger.warning`, `logger.debug`); no bare `print()` statements.
-- Atomic commits following the Conventional Commits specification (`feat:`, `chore:`, `docs:`).
+- **AGENTS.md** + `.agents/rules/` — Antigravity guidelines (Python style, testing conventions)
+- **Conventional Commits** — `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `test:`
+- **Line length** ≤ 88 (Black-compatible)
+- **Type hints** required for all public functions
+- **Tests** required for every new module (mark integration tests with `@pytest.mark.integration`)
+
+---
+
+## License
+
+MIT
