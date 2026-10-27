@@ -1,197 +1,231 @@
-# Antigravity Crawler
+# Google Maps Review Scraper
 
-An asynchronous, modular web crawler written in Python that provides efficient BFS crawling, intelligent rate limiting, and robust HTML extraction. Built with `httpx`, `selectolax`, and standard library SQLite, it is designed for scalable, respectful, and reliable data collection.
+An asynchronous, resumable, Playwright-based scraper for Google Maps cafe reviews. It attaches to an existing Google Chrome debugging session via Chrome DevTools Protocol (CDP) to preserve active logins, uses tab pooling to prevent blank page loads, validates venues by coordinates and Persian↔Latin transliteration, and exports reviews into Excel-compatible CSVs.
+
+---
 
 ## Features
 
-- **Async HTTP Fetching**: Powered by `httpx.AsyncClient` with automatic retries, exponential backoff, jitter, and configurable timeouts.
-- **Fast HTML Parsing**: High-performance HTML parsing and text extraction using `selectolax` (Lexbor engine).
-- **SQLite-Backed Page Store**: Thread-safe persistent storage using `asyncio.to_thread` with automatic upserts (`INSERT OR REPLACE`) keyed by URL.
-- **BFS Crawling**: Level-by-level breadth-first traversal with concurrency limits, configurable max pages, and maximum depth bounds.
-- **URL Normalization**: Canonicalizes URLs by lowercasing scheme/host, stripping fragments, resolving relative paths, and preserving subpath slashes and query strings.
-- **Follows HTTP Redirects**: Transparently follows HTTP 3xx redirects during fetching.
-- **Respects robots.txt**: Domain-level caching of `robots.txt` rules with automated checking and support for standard and fractional `Crawl-delay` directives.
-- **Per-Domain Rate Limiting**: Domain-specific request rate limiting synchronized using individual `asyncio.Lock` primitives.
-- **Sitemap.xml Support**: Seeds crawler queues from XML sitemaps, nested `<sitemapindex>` hierarchies (up to 3 levels deep), and gzip-compressed (`.xml.gz`) archives.
-- **CLI Subcommands**: Command-line interface offering `crawl`, `show`, and `stats` subcommands.
+- **Async Multi-Worker Scraping**: Spawns $N$ concurrent workers sharing a unified cafe queue and tab pool.
+- **CDP-Based Browser Automation**: Attaches to a running Chrome instance (`--remote-debugging-port=9222`), preserving authenticated Google sessions and avoiding automated bot detection.
+- **Tab Pooling**: Reuses existing user-opened Maps tabs from an `asyncio.Queue` tab pool to circumvent CDP blank page creation issues.
+- **Strict Coordinate Validation**: Matches venues using Haversine distance (500m strict threshold for page URLs, 800m loose threshold for search result hrefs).
+- **Persian↔Latin Transliteration Fallback**: Normalizes Persian characters, maps architectural tokens (e.g., "عمارت" ↔ "Mansion"), and uses phonetic matching when coordinates are absent.
+- **Resumable Checkpointing**: Tracks state in `crawler_state.json` via batched atomic writes (`os.replace`), only recording cafes with $\ge 1$ review.
+- **Skip Reporting**: Records un-scraped venues and exact error/skip reasons to `data/skipped_cafes.csv`.
+- **Targeted Retry Mode**: Supports `--retry-skipped` with `--skipped-input` to re-attempt failed venues without rescraping completed ones.
+- **Excel-Compatible CSV Export**: Streams reviews safely under an `asyncio.Lock` using `utf-8-sig` encoding (UTF-8 with BOM) and collapsed newlines.
 
-## Project Structure
+---
 
-```text
-antigravity-crawler/
-├── AGENTS.md                 # Project agent rules and architectural guidelines
-├── .agents/
-│   ├── rules/                # Conditional rules and linting standards
-│   └── skills/               # Reusable agent skills
-├── data/
-│   └── crawl.db              # Default SQLite database location
-├── src/
-│   ├── __init__.py           # Package marker
-│   ├── crawler.py            # BFS traversal orchestrator and crawl lifecycle
-│   ├── fetcher.py            # Async HTTP fetching with retry logic
-│   ├── main.py               # CLI entrypoint and subcommand dispatchers
-│   ├── parser.py             # HTML parsing, link extraction, text cleaning, URL normalization
-│   ├── ratelimit.py          # Per-domain rate limiter with asyncio locks
-│   ├── robots.py             # Robots.txt parser and rule cache
-│   ├── sitemap.py            # XML sitemap parser and recursive extractor
-│   └── storage.py            # SQLite page storage engine with async delegation
-├── tests/
-│   ├── fixtures/             # HTML fixture files (simple, relative links, noise)
-│   ├── test_crawler.py       # Integration tests for crawler orchestration
-│   ├── test_fetcher.py       # Fetching, retry, and redirect tests
-│   ├── test_main.py          # CLI subcommand and argument parser tests
-│   ├── test_parser.py        # Parser, title extraction, and URL normalization tests
-│   ├── test_ratelimit.py     # Domain concurrency and delay spacing tests
-│   ├── test_robots.py        # Robots.txt parsing and crawl delay tests
-│   ├── test_sitemap.py       # Sitemap parsing, sitemapindex, and gzip tests
-│   └── test_storage.py       # Database CRUD and async concurrency tests
-├── pytest.ini                # Pytest configuration (pythonpath)
-├── requirements.txt          # Python dependencies
-└── README.md                 # Project documentation
-```
+## Prerequisites
+
+1. **Python 3.10+** installed on Linux / macOS / Windows.
+2. **Google Chrome** installed.
+3. **Google Account** logged in to Google Maps in Chrome.
+4. **Active Chrome Debug Session**:
+   Launch Chrome with remote debugging and a dedicated profile directory:
+   ```bash
+   google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug-crawler
+   ```
+5. **Open Tabs**:
+   In that opened Chrome window, navigate to `https://www.google.com/maps` and open exactly $N$ tabs (where $N$ equals your `--workers` count, default 4). Log in to your Google account in this window.
+
+---
 
 ## Installation
 
 1. Create and activate a Python virtual environment:
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
 
 2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Install Playwright Chromium browser binaries (for fallback execution):
+   ```bash
+   playwright install chromium
+   ```
+
+---
+
+## Usage
+
+### 1. Basic Execution
+Scrape approved cafes from `cafes_cafe.db` using 4 concurrent workers:
 ```bash
-pip install -r requirements.txt
+python run.py --db cafes_cafe.db --workers 4
 ```
 
-## Usage Examples
-
-The CLI provides three subcommands: `crawl`, `show`, and `stats`. Commands can be executed via `python3 src/main.py <subcommand>` (or `python src/main.py <subcommand>` inside an active virtual environment).
-
-### 1. Crawl Web Pages
-
-Start a crawl using a seed URL:
+### 2. Limit Number of Cafes
+Process only the first 50 pending cafes:
 ```bash
-python3 src/main.py crawl --seed https://example.com --max-pages 20 --max-depth 2 --concurrency 3 --rate-limit 1.0
+python run.py --db cafes_cafe.db --workers 4 --limit 50
 ```
 
-Start a crawl seeded from an XML sitemap:
+### 3. Automatically Resume
+Interrupted runs resume seamlessly without duplicate scrapes (already completed cafes in `crawler_state.json` are skipped):
 ```bash
-python3 src/main.py crawl --sitemap https://example.com/sitemap.xml --max-pages 50 --concurrency 5
+python run.py --db cafes_cafe.db
 ```
 
-Crawl seeded from a gzip-compressed sitemap:
+### 4. Retry Previously Skipped Cafes
+Target only cafes logged in the skip report:
 ```bash
-python3 src/main.py crawl --sitemap https://example.com/sitemap.xml.gz
+python run.py --retry-skipped --skipped-input data/skipped_cafes.csv
 ```
 
-Restrict crawl traversal strictly to the seed domain:
+### 5. Custom CDP Endpoint
+Attach to Chrome running on an alternate debugging port:
 ```bash
-python3 src/main.py crawl --seed https://example.com --same-domain-only
+python run.py --cdp-url http://localhost:9223
 ```
 
-Bypass robots.txt checks and crawl-delay directives:
-```bash
-python3 src/main.py crawl --seed https://example.com --ignore-robots
-```
+---
 
-Store pages in a custom SQLite database path:
-```bash
-python3 src/main.py crawl --seed https://example.com --db data/my_crawl.db
-```
-
-### 2. Display Stored Page Details
-
-Retrieve and view the title, fetched timestamp, and text snippet of a saved page:
-```bash
-python3 src/main.py show --url https://example.com/
-```
-
-Specify a custom database location:
-```bash
-python3 src/main.py show --url https://example.com/ --db data/my_crawl.db
-```
-
-### 3. Display Storage Statistics
-
-View the total number of pages stored in the database:
-```bash
-python3 src/main.py stats
-```
-
-Specify a custom database location:
-```bash
-python3 src/main.py stats --db data/my_crawl.db
-```
-
-## CLI Reference
-
-### `crawl` Subcommand
+## CLI Flags Reference
 
 | Flag | Default | Description |
-| --- | --- | --- |
-| `--seed URL` | None | Seed URL to start BFS crawling (mutually exclusive with `--sitemap`, exactly one required) |
-| `--sitemap URL` | None | Sitemap URL to seed crawl queue (mutually exclusive with `--seed`, exactly one required) |
-| `--max-pages N` | `10` | Maximum number of pages to crawl |
-| `--max-depth N` | `2` | Maximum link crawl depth from seed |
-| `--concurrency N` | `3` | Maximum concurrent HTTP requests |
-| `--db PATH` | `data/crawl.db` | Path to SQLite database file |
-| `--same-domain-only` | `False` | Restrict crawling strictly to seed URL domain |
-| `--ignore-robots` | `False` | Ignore robots.txt rules and crawl-delay directives |
-| `--rate-limit S` | `1.0` | Minimum delay in seconds between requests to the same domain |
+|------|---------|-------------|
+| `--db` | `cafes_cafe.db` | Path to read-only SQLite database file |
+| `--output` | `data/google_reviews.csv` | Destination CSV file for scraped reviews |
+| `--state` | `crawler_state.json` | JSON checkpoint file tracking completed slugs |
+| `--skipped` | `data/skipped_cafes.csv` | CSV report path for logging skipped cafes |
+| `--skipped-input` | `None` | Source skip CSV file when running in `--retry-skipped` mode |
+| `--limit` | `None` | Maximum number of cafes to process during this execution |
+| `--workers` | `4` | Number of concurrent workers (must equal open Maps tabs) |
+| `--cdp-url` | `http://localhost:9222` | Chrome DevTools Protocol remote debugging endpoint |
+| `--headful` | `False` | Run headful browser if local Chromium launch fallback occurs |
+| `--retry-skipped` | `False` | Restrict processing exclusively to slugs from `--skipped-input` |
+| `--log-level` | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 
-### `show` Subcommand
+---
 
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--url URL` | None (Required) | Absolute URL of the stored page to display |
-| `--db PATH` | `data/crawl.db` | Path to SQLite database file |
+## Output Schema
 
-### `stats` Subcommand
+### 1. Reviews Data (`data/google_reviews.csv`)
+Encoded in UTF-8 with BOM (`utf-8-sig`) with collapsed newlines for full Microsoft Excel compatibility:
+- `cafe_slug`: Unique slug identifier from SQLite.
+- `cafe_name`: Name of the cafe.
+- `city`: City location.
+- `author`: Reviewer display name.
+- `rating`: Rating string (e.g. `5 stars`).
+- `date`: Relative or absolute review post date.
+- `text`: Review text content with whitespace and newlines collapsed.
 
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--db PATH` | `data/crawl.db` | Path to SQLite database file |
+### 2. Skipped Venues Report (`data/skipped_cafes.csv`)
+- `cafe_id`: Numeric database primary key.
+- `cafe_slug`: Unique cafe slug.
+- `cafe_name`: Venue name.
+- `reason`: Machine-readable reason code from `SkipReason` (e.g. `place_coords_mismatch`, `zero_reviews`).
+
+### 3. Checkpoint State (`crawler_state.json`)
+Atomic JSON dictionary flushed periodically and upon clean shutdown:
+```json
+{
+  "processed_slugs": [
+    "cafe-bahar",
+    "cafe-nili",
+    "cafe-tehran"
+  ]
+}
+```
+
+---
+
+## Project Structure
+
+```text
+gmap-antigravity/
+├── .agents/
+│   └── rules/                # System agent rules and linters
+├── AGENTS.md                 # Project architecture standards
+├── data/                     # Ignored output directory
+│   ├── google_reviews.csv    # Scraped customer reviews
+│   └── skipped_cafes.csv     # Skip and failure report
+├── logs/                     # Rotating crawler log files
+├── src/
+│   ├── __init__.py           # Package marker
+│   ├── db_loader.py          # Read-only SQLite database loader
+│   ├── exporter.py           # Async-safe CSV exporter with BOM
+│   ├── resolver.py           # Search query builder and coordinate math
+│   ├── scraper.py            # Playwright CDP tab pool and review extractor
+│   ├── skip_reporter.py      # Skipped venue tracking and reload
+│   └── state.py              # Batched atomic state checkpointing
+├── tests/
+│   ├── __init__.py           # Test package marker
+│   ├── test_db_loader.py     # SQLite loader tests
+│   ├── test_exporter.py      # CSV exporter concurrency tests
+│   ├── test_resolver.py      # Query resolution and coordinate tests
+│   ├── test_run.py           # CLI orchestrator tests
+│   ├── test_scraper.py       # Scraper unit and CDP fallback tests
+│   ├── test_skip_reporter.py # Skip reporting tests
+│   └── test_state.py         # Checkpointing and atomic write tests
+├── .gitignore                # Git ignore rules
+├── pytest.ini                # Pytest configuration
+├── requirements.txt          # Python dependencies
+├── run.py                    # CLI orchestrator entrypoint
+└── README.md                 # Project documentation
+```
+
+---
 
 ## Testing
 
-Run the full test suite using `pytest`:
+Run the full automated test suite using `pytest`:
 ```bash
-./venv/bin/pytest tests/ -v
+./.venv/bin/pytest tests/ -v
 ```
 
-All 84 tests cover unit and integration requirements across modules:
-- Fetching retry mechanisms, status code handling, and redirects (`test_fetcher.py`)
-- HTML link extraction, text cleaning, and URL normalization (`test_parser.py`)
-- SQLite storage schema, async operations, and upserts (`test_storage.py`)
-- Robots.txt parsing, cache lookups, and crawl-delay values (`test_robots.py`)
-- Domain rate limiter spacing, zero delay, and concurrency (`test_ratelimit.py`)
-- XML sitemaps, sitemapindex recursion, and gzip decompression (`test_sitemap.py`)
-- BFS crawler orchestration and limits (`test_crawler.py`)
-- CLI execution, arguments, and exit codes (`test_main.py`)
+The test suite includes 81 unit tests that run completely offline without needing a browser or network access:
+- **`test_db_loader.py`**: SQLite schema validation, read-only mode, and optional columns.
+- **`test_resolver.py`**: Address trimming, Persian stop word removal, Haversine formula, and coordinate regex.
+- **`test_exporter.py`**: UTF-8 BOM encoding, CSV row escaping, newline collapsing, and concurrent appends.
+- **`test_state.py`**: Batched threshold writes, corruption handling, and atomic replacements (`os.replace`).
+- **`test_skip_reporter.py`**: Skip CSV generation and slug re-loading for retry mode.
+- **`test_scraper.py`**: Transliteration matching, tab acquisition/release, coordinate validation, and selector fallbacks.
+- **`test_run.py`**: Argument parsing, limit constraints, worker loops, and cancellation handling.
 
-## Architecture Notes
-
-- **BFS Level-by-Level Traversal**: The crawler queue maintains `(url, depth)` pairs and processes them in FIFO order using an `asyncio.Queue`. Concurrency is bounded by an `asyncio.Semaphore`. Discovered links are normalized and checked against the database before enqueuing to prevent duplicate fetches.
-- **Per-Domain Rate Limiter**: Implemented in `src/ratelimit.py` (`DomainRateLimiter`) using per-domain `asyncio.Lock` primitives and monotonic clock tracking (`time.monotonic()`). Requests to distinct domains execute concurrently, while requests to the same domain are spaced out by the effective delay.
-- **Robots.txt Cache**: `RobotsCache` in `src/robots.py` fetches and parses `robots.txt` once per domain using standard library `urllib.robotparser`. When `respect_robots` is enabled, paths are checked prior to dispatch, and `Crawl-delay` directives dynamically override default rate limiting if greater than `--rate-limit`.
-- **Redirect Handling**: Configured via `follow_redirects=True` in `httpx.AsyncClient` within `src/fetcher.py`. Fetches follow 3xx redirects to completion, and extracted links resolve against target locations.
-- **SQLite Storage Schema**: The `PageStore` in `src/storage.py` delegates blocking SQLite operations to worker threads via `asyncio.to_thread`. The database schema is defined as:
-
-```sql
-CREATE TABLE IF NOT EXISTS pages (
-    url TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    text TEXT NOT NULL,
-    fetched_at TEXT NOT NULL,
-    status INTEGER NOT NULL
-);
+To run the live integration test (requires a running Chrome debug session on port 9222):
+```bash
+./.venv/bin/pytest -m integration tests/
 ```
 
-Pages are persisted using `INSERT OR REPLACE INTO pages`, ensuring duplicate visits update records cleanly without primary key collisions.
+---
+
+## Architecture & Design Notes
+
+1. **Pipeline Lifecycle**:
+   `DatabaseLoader` queries approved cafes $\rightarrow$ `LocationResolver` constructs primary and fallback URLs $\rightarrow$ `CrawlerPipeline` dispatches tasks across `ScraperWorker`s via the tab pool $\rightarrow$ `CSVExporter` streams reviews under `asyncio.Lock` $\rightarrow$ `StateManager` flushes processed slugs.
+2. **Tab Pool Management**:
+   Playwright's `context.new_page()` frequently yields blank pages when attached to Chrome over CDP. `GoogleMapsScraper` populates an `asyncio.Queue` with user-opened Maps tabs and recycles them safely between workers.
+3. **Two-Tier Validation**:
+   - Primary: Haversine distance $\le 500\text{m}$ for page URLs, $\le 800\text{m}$ for search result links.
+   - Fallback: Persian Unicode normalization and phonetic transliteration matching for venues lacking GPS coordinates.
+4. **Rate Limit Resilience**:
+   Detects `google.com/sorry` redirects and pauses gracefully. Google typically throttles review requests after ~50 venues per IP address. If rate-limited, terminate with `Ctrl+C`, wait 30–60 minutes, and resume by re-running `python run.py --db cafes_cafe.db`.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Solution |
+|---------|-------|----------|
+| CDP endpoint unreachable | Chrome debug session is not running | Start Chrome with `google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug-crawler` |
+| Tabs load blank | Missing pre-opened Google Maps tabs | Open $N$ tabs navigating to `https://www.google.com/maps` in the debug Chrome window, then restart `run.py` |
+| Rate limiting / timeouts | Google IP throttling (`google.com/sorry`) | Press `Ctrl+C` to cleanly flush state, wait 30–60 minutes, and resume execution |
+| Venue skipped / no result matched | Inaccurate address or venue not found on Maps | Inspect `data/skipped_cafes.csv` to review the skip reason code |
+
+---
 
 ## Development Conventions
 
-- **Code Style**: Strictly adheres to PEP 8, with function signatures fully typed and docstrings formatted per PEP 257.
-- **Logging**: Uses `loguru` (with standard library `logging` fallback) for all log outputs. Direct `print()` statements are avoided in core library modules.
-- **Antigravity Rules**: System rules and architecture guidelines are enforced in `AGENTS.md` and `.agents/rules/`.
-- **Conventional Commits**: Git commits follow the Conventional Commits specification (e.g., `feat:`, `fix:`, `docs:`, `test:`, `refactor:`).
+- Strictly complies with PEP 8 and line lengths $\le 88$.
+- Full type annotations on all function and method signatures.
+- Detailed docstrings adhering to PEP 257.
+- Loguru logging throughout (`logger.info`, `logger.warning`, `logger.debug`); no bare `print()` statements.
+- Atomic commits following the Conventional Commits specification (`feat:`, `chore:`, `docs:`).
