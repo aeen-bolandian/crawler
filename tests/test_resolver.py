@@ -136,11 +136,22 @@ def test_resolve_generates_fallbacks(sample_cafe_with_coords: CafeRecord) -> Non
 
 
 def test_resolve_appends_coordinates(sample_cafe_with_coords: CafeRecord) -> None:
-    """Verify that center and zoom params are appended when coordinates present."""
-    resolver = LocationResolver(zoom=16)
+    """Verify that center and zoom params are appended when use_center=True."""
+    resolver = LocationResolver(zoom=16, use_center=True)
     target = resolver.resolve(sample_cafe_with_coords)
 
     assert "&center=35.7592,51.4089&zoom=16" in target.url
+
+
+def test_resolve_default_omits_center(
+    sample_cafe_with_coords: CafeRecord,
+) -> None:
+    """Verify that center and zoom params are omitted by default."""
+    resolver = LocationResolver(zoom=16)
+    target = resolver.resolve(sample_cafe_with_coords)
+
+    assert "center=" not in target.url
+    assert "zoom=" not in target.url
 
 
 def test_resolve_omits_coordinates(sample_cafe_without_coords: CafeRecord) -> None:

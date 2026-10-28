@@ -26,6 +26,7 @@ except ImportError:
 
     logger = logging.getLogger(__name__)
 
+from src.db_loader import CafeRecord
 from src.exporter import ReviewRecord
 from src.resolver import (
     MAX_MATCH_DISTANCE_LOOSE_M,
@@ -391,6 +392,88 @@ class ScraperWorker:
             f"role_main={main_c} | results_div={results_div_c}"
         )
 
+    async def _retry_with_bare_name(
+        self, page: Page, cafe: CafeRecord
+    ) -> bool:
+        """Retry search with just name + city when coord mismatch occurs.
+
+        Returns True if a place within MAX_MATCH_DISTANCE_STRICT_M is found.
+        """
+        from urllib.parse import quote_plus
+
+        bare_query = f"{cafe.name} {cafe.city}".strip()
+        bare_url = (
+            f"https://www.google.com/maps/search/?api=1"
+            f"&query={quote_plus(bare_query)}&hl=en"
+        )
+        logger.debug(
+            f"[w{self.worker_id}][{cafe.id}] retry with bare query: "
+            f"{bare_query!r}"
+        )
+        try:
+            await page.goto(
+                bare_url,
+                timeout=self.config.PAGE_LOAD_TIMEOUT_MS,
+                wait_until="commit",
+            )
+            await page.wait_for_timeout(self.config.POST_GOTO_SETTLE_MS)
+        except Exception as err:
+            logger.debug(
+                f"[w{self.worker_id}][{cafe.id}] bare retry nav failed: {err}"
+            )
+            return False
+
+        # Check if we landed on a place page directly
+        page_coords = extract_coords_from_url(page.url)
+        if (
+            page_coords
+            and cafe.has_coordinates
+            and cafe.latitude
+            and cafe.longitude
+        ):
+            dist = haversine_m(cafe.latitude, cafe.longitude, *page_coords)
+            if dist <= MAX_MATCH_DISTANCE_STRICT_M:
+                logger.info(
+                    f"[w{self.worker_id}][{cafe.id}] bare retry matched "
+                    f"(dist={dist:.1f}m)"
+                )
+                return True
+
+        # Otherwise, try the first result link on a search results page
+        links = page.locator(self.config.SEL_RESULT_LINK)
+        count = await links.count()
+        if count == 0:
+            return False
+        try:
+            href = await links.first.get_attribute("href") or ""
+            coords = extract_coords_from_href(href)
+            if (
+                coords
+                and cafe.has_coordinates
+                and cafe.latitude
+                and cafe.longitude
+            ):
+                dist = haversine_m(cafe.latitude, cafe.longitude, *coords)
+                if dist <= MAX_MATCH_DISTANCE_STRICT_M:
+                    logger.info(
+                        f"[w{self.worker_id}][{cafe.id}] bare retry matched "
+                        f"via first result (dist={dist:.1f}m)"
+                    )
+                    await page.goto(
+                        href,
+                        timeout=self.config.PAGE_LOAD_TIMEOUT_MS,
+                        wait_until="commit",
+                    )
+                    await page.wait_for_timeout(
+                        self.config.POST_GOTO_SETTLE_MS
+                    )
+                    return True
+        except Exception as err:
+            logger.debug(
+                f"[w{self.worker_id}][{cafe.id}] bare retry link failed: {err}"
+            )
+        return False
+
     def _trigger_rate_limit(self, cafe_slug: str) -> None:
         """Trigger shared rate limit pause event and log warning.
 
@@ -611,6 +694,7 @@ class ScraperWorker:
             self._last_skip_reason = SkipReason.PAGE_SIGNAL_NONE
             return []
 
+        matched_via_bare_retry = False
         if not is_place and link_count > 0:
             # Multi-result search feed: find matching venue link
             matched_link = None
@@ -640,69 +724,86 @@ class ScraperWorker:
                         break
 
             if matched_link is None:
-                self._last_skip_reason = SkipReason.NO_RESULT_MATCHED
-                return []
-
-            try:
-                await matched_link.click()
-                await page.wait_for_timeout(self.config.POST_GOTO_SETTLE_MS)
-            except Exception as err:
-                if _is_crash_error(err):
-                    raise
-                logger.warning(f"Worker {self.worker_id}: click link failed: {err}")
-                self._last_skip_reason = SkipReason.PAGE_NAV_FAILED
-                return []
-
-        if is_place:
-            logger.debug(
-                f"[w{self.worker_id}][{target.cafe.id}] validating place match"
-            )
-
-        # Validate venue on single place view
-        page_coords = extract_coords_from_url(page.url)
-        if (
-            page_coords
-            and target.cafe.has_coordinates
-            and target.cafe.latitude is not None
-            and target.cafe.longitude is not None
-        ):
-            dist = haversine_m(
-                target.cafe.latitude,
-                target.cafe.longitude,
-                page_coords[0],
-                page_coords[1],
-            )
-            if dist > MAX_MATCH_DISTANCE_STRICT_M:
                 logger.warning(
-                    f"Coordinate mismatch for {target.cafe.slug}: "
-                    f"{dist:.1f}m > {MAX_MATCH_DISTANCE_STRICT_M}m"
+                    f"No matching link within distance for {target.cafe.slug}. "
+                    f"Retrying with bare name+city..."
                 )
-                self._last_skip_reason = SkipReason.PLACE_COORDS_MISMATCH
-                return []
-        else:
-            try:
-                val = await page.locator(
-                    self.config.SEL_PLACE_H1
-                ).first.inner_text(timeout=2000)
-                h1_text = val.strip() if isinstance(val, str) else ""
-                if h1_text.lower() in ("results", "نتایج"):
-                    await self._log_no_signal_diagnostics(
-                        page,
-                        target.cafe.id,
-                        f"place check remained on search results ('{h1_text}')",
-                    )
-                    self._last_skip_reason = SkipReason.PAGE_SIGNAL_NONE
+                if await self._retry_with_bare_name(page, target.cafe):
+                    matched_via_bare_retry = True
+                else:
+                    self._last_skip_reason = SkipReason.NO_RESULT_MATCHED
                     return []
-                if not names_look_same(target.cafe.name, h1_text):
+            else:
+                try:
+                    await matched_link.click()
+                    await page.wait_for_timeout(self.config.POST_GOTO_SETTLE_MS)
+                except Exception as err:
+                    if _is_crash_error(err):
+                        raise
                     logger.warning(
-                        f"Name mismatch for {target.cafe.slug}: "
-                        f"'{target.cafe.name}' vs '{h1_text}'"
+                        f"Worker {self.worker_id}: click link failed: {err}"
                     )
-                    self._last_skip_reason = SkipReason.PLACE_NAME_MISMATCH
+                    self._last_skip_reason = SkipReason.PAGE_NAV_FAILED
                     return []
-            except Exception as err:
-                if _is_crash_error(err):
-                    raise
+
+        if not matched_via_bare_retry:
+            if is_place:
+                logger.debug(
+                    f"[w{self.worker_id}][{target.cafe.id}] validating place match"
+                )
+
+            # Validate venue on single place view
+            page_coords = extract_coords_from_url(page.url)
+            if (
+                page_coords
+                and target.cafe.has_coordinates
+                and target.cafe.latitude is not None
+                and target.cafe.longitude is not None
+            ):
+                dist = haversine_m(
+                    target.cafe.latitude,
+                    target.cafe.longitude,
+                    page_coords[0],
+                    page_coords[1],
+                )
+                if dist > MAX_MATCH_DISTANCE_STRICT_M:
+                    logger.warning(
+                        f"Coordinate mismatch for {target.cafe.slug}: "
+                        f"{dist:.1f}m > {MAX_MATCH_DISTANCE_STRICT_M}m. "
+                        f"Retrying with bare name+city..."
+                    )
+                    if await self._retry_with_bare_name(page, target.cafe):
+                        # Bare retry succeeded — now proceed to click Reviews tab
+                        # (the page is already on the correct place)
+                        # Fall through to the review-tab logic below
+                        pass
+                    else:
+                        self._last_skip_reason = SkipReason.PLACE_COORDS_MISMATCH
+                        return []
+            else:
+                try:
+                    val = await page.locator(
+                        self.config.SEL_PLACE_H1
+                    ).first.inner_text(timeout=2000)
+                    h1_text = val.strip() if isinstance(val, str) else ""
+                    if h1_text.lower() in ("results", "نتایج"):
+                        await self._log_no_signal_diagnostics(
+                            page,
+                            target.cafe.id,
+                            f"place check remained on search results ('{h1_text}')",
+                        )
+                        self._last_skip_reason = SkipReason.PAGE_SIGNAL_NONE
+                        return []
+                    if not names_look_same(target.cafe.name, h1_text):
+                        logger.warning(
+                            f"Name mismatch for {target.cafe.slug}: "
+                            f"'{target.cafe.name}' vs '{h1_text}'"
+                        )
+                        self._last_skip_reason = SkipReason.PLACE_NAME_MISMATCH
+                        return []
+                except Exception as err:
+                    if _is_crash_error(err):
+                        raise
 
         # Click reviews tab
         try:
