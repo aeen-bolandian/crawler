@@ -86,6 +86,19 @@ When the script finishes, your reviews are saved under `data/`:
 - `data/reviews_shardNN.csv` (e.g., `data/reviews_shard00.csv`)
 - `data/skipped_shardNN.csv` (optional skip log)
 
+### Remove duplicates from output CSVs
+If you Ctrl+C mid-run, some rows may be duplicated. Fix them:
+```bash
+python scripts/dedup_csv.py data/reviews_shard*.csv
+```
+
+### Retry only timing-related skips
+Filter to failures that may succeed on retry (not genuine absences):
+```bash
+grep -E "reviews_tab_could_not_be_clicked|review_cards_never_appeared|zero_reviews|no_page_signal|exception" data/skipped_shardNN.csv > data/skipped_shardNN_retryable.csv
+./run_retry_skipped.sh N 15 data/skipped_shardNN_retryable.csv
+```
+
 ---
 
 ## Retry Skipped Cafes (Optional)
@@ -124,6 +137,9 @@ Replace `N` with your assigned shard number (`0` through `14`).
 ---
 
 ## Troubleshooting
+
+### Cafes found but reviews not extracted
+If the log shows `reviews_tab_could_not_be_clicked`, `review_cards_never_appeared`, or `zero_reviews`, wait for stable internet/VPN. Then retry just those cafes using the retry script (see below).
 
 - **Chrome crash / OOM:**
   The scraper automatically rotates tabs every 10 cafes and restarts Chrome between 50-cafe chunks. If Chrome terminates unexpectedly, simply re-run `./run_shard_with_restart.sh N 15` — state is preserved and already scraped cafes are skipped.

@@ -262,6 +262,33 @@ def _has_substr_overlap(s1: str, s2: str, min_len: int = 4) -> bool:
     return False
 
 
+_PHONETIC_MAP: dict[str, str] = {
+    "بوتیک": "boutique",
+    "پیتزا": "pizza",
+    "فست": "fast",
+    "فود": "food",
+    "جَز": "jazz",
+    "جز": "jazz",
+    "جاز": "jazz",
+    "راشا": "russia",
+    "روسیه": "russia",
+    "قلب": "heart",
+    "طلایی": "golden",
+    "صورتی": "soroush",
+    "کافه": "cafe",
+    "رستوران": "restaurant",
+    "آمریکایی": "american",
+    "ایتالیایی": "italian",
+}
+
+
+def _apply_phonetic_map(text: str) -> str:
+    """Translate common Persian cafe words to Latin equivalents for matching."""
+    for fa, en in _PHONETIC_MAP.items():
+        text = text.replace(fa, en)
+    return text
+
+
 def names_look_same(name1: str, name2: str) -> bool:
     """Determine whether two cafe names refer to the same venue.
 
@@ -273,6 +300,9 @@ def names_look_same(name1: str, name2: str) -> bool:
     norm2 = normalize_venue_name(name2)
     if not norm1 or not norm2:
         return False
+
+    norm1 = _apply_phonetic_map(norm1)
+    norm2 = _apply_phonetic_map(norm2)
 
     if len(norm1) < 3 or len(norm2) < 3:
         return False

@@ -273,3 +273,16 @@ def test_names_look_same_mismatches(name_a: str, name_b: str) -> None:
     """Verify distinct or rejected short names do not match."""
     assert names_look_same(name_a, name_b) is False
     assert names_look_same(name_b, name_a) is False
+
+
+def test_names_look_same_phonetic_pairs() -> None:
+    """Verify that Persian-English phonetic pairs match via phonetic map."""
+    pairs = [
+        ("بوتیک پیتزا", "Boutique Pizza"),
+        ("جَز کافه", "Jazz Cafe"),
+        ("کافه رستوران راشا", "Cafe Russia"),
+        ("قلب طلایی", "Golden Heart"),
+    ]
+    for a, b in pairs:
+        assert names_look_same(a, b), f"expected {a!r} ≈ {b!r}"
+

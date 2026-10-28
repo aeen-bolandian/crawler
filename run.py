@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import hashlib
 from pathlib import Path
 import random
@@ -244,8 +245,9 @@ class CrawlerPipeline:
         reviews = await worker.scrape(target)
 
         if len(reviews) >= 1:
-            await self.exporter.append_many(reviews)
+            # Mark FIRST so a crash won't re-process this cafe
             await self.state.mark_processed(cafe.slug)
+            await self.exporter.append_many(reviews)
             logger.info(
                 f"Cafe '{cafe.slug}': scraped and exported {len(reviews)} reviews."
             )
@@ -388,6 +390,20 @@ async def _main_async(args: argparse.Namespace) -> int:
     exporter = CSVExporter(args.output)
     resolver = LocationResolver()
 
+    def _emergency_flush() -> None:
+        try:
+            import json
+            import os
+
+            tmp = state.state_path.with_suffix(".tmp")
+            payload = {"processed_slugs": sorted(state.processed)}
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(tmp, state.state_path)
+        except Exception:
+            pass
+
+    atexit.register(_emergency_flush)
+
     try:
         with DatabaseLoader(args.db) as loader:
             async with GoogleMapsScraper(
@@ -416,6 +432,8 @@ async def _main_async(args: argparse.Namespace) -> int:
         logger.error(f"Fatal error during crawler execution: {err}")
         await state.flush()
         return 1
+    finally:
+        await state.flush()
 
     return 0
 

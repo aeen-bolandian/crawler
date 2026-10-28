@@ -258,110 +258,111 @@ class ScraperWorker:
                     raise
 
     async def _click_reviews_tab(
-        self, page: Page, target: Optional[ResolvedTarget] = None
+        self,
+        page: Page,
+        target: Optional[ResolvedTarget | CafeRecord] = None,
     ) -> bool:
-        """Attempt clicking the reviews tab with timeout and fallback selectors."""
-        cafe_id = target.cafe.id if target and target.cafe else ""
-        logger.debug(f"[w{self.worker_id}][{cafe_id}] waiting for Reviews tab")
+        """Attempt clicking the reviews tab with fallback and logging."""
+        cafe_id = ""
+        if isinstance(target, ResolvedTarget) and target.cafe:
+            cafe_id = target.cafe.id
+        elif isinstance(target, CafeRecord):
+            cafe_id = target.id
 
-        tab_el = None
-        try:
-            tab_el = await page.wait_for_selector(
-                self.config.SEL_REVIEWS_TAB,
-                timeout=10_000,
-                state="visible",
-            )
-        except Exception as err:
-            if _is_crash_error(err):
-                raise
-            try:
-                tab_el = await page.wait_for_selector(
-                    self.config.SEL_REVIEWS_TAB_FALLBACK,
-                    timeout=3_000,
-                    state="visible",
-                )
-            except Exception as err2:
-                if _is_crash_error(err2):
-                    raise
-                tab_el = None
+        tab = page.locator(self.config.SEL_REVIEWS_TAB).first
+        if await tab.count() == 0:
+            tab = page.get_by_role(
+                "tab", name=re.compile(r"reviews|نظرات", re.I)
+            ).first
 
-        if tab_el is None:
+        if await tab.count() == 0:
+            all_tabs = page.locator('button[role="tab"]')
+            n = await all_tabs.count()
+            labels: list[str] = []
+            for i in range(min(n, 10)):
+                try:
+                    t = all_tabs.nth(i)
+                    aria = await t.get_attribute("aria-label") or ""
+                    text = (await t.inner_text(timeout=1000)).strip()
+                    labels.append(f"{text}|{aria}")
+                except Exception as err:
+                    if _is_crash_error(err):
+                        raise
             logger.warning(
-                f"[w{self.worker_id}][{cafe_id}] Reviews tab not found within 10s"
+                f"[w{self.worker_id}][{cafe_id}] Reviews tab not found. "
+                f"Found {n} tabs: {labels}"
             )
             return False
 
         try:
-            is_selected = await tab_el.get_attribute("aria-selected") == "true"
-            if is_selected:
-                logger.debug(
-                    f"[w{self.worker_id}][{cafe_id}] Reviews tab already selected"
-                )
-                return True
+            selected = await tab.get_attribute("aria-selected")
         except Exception as err:
             if _is_crash_error(err):
                 raise
+            selected = None
 
-        logger.debug(
-            f"[w{self.worker_id}][{cafe_id}] Reviews tab found, clicking"
-        )
+        if selected == "true":
+            return True
+
         try:
-            await tab_el.click(timeout=5_000)
-            logger.debug(
-                f"[w{self.worker_id}][{cafe_id}] Reviews tab clicked"
-            )
+            if not await tab.is_visible():
+                await page.wait_for_timeout(2000)
+                if not await tab.is_visible():
+                    return False
+        except Exception as err:
+            if _is_crash_error(err):
+                raise
+            return False
+
+        try:
+            await tab.click(timeout=10_000)
+            await page.wait_for_timeout(3000)
             return True
         except Exception as err:
             if _is_crash_error(err):
                 raise
-            logger.warning(
-                f"[w{self.worker_id}][{cafe_id}] Reviews tab click failed: {err}"
+            logger.debug(
+                f"[w{self.worker_id}][{cafe_id}] click failed: {err}"
             )
             return False
 
     async def _wait_for_review_cards(
-        self, page: Page, target: Optional[ResolvedTarget] = None
+        self,
+        page: Page,
+        target: Optional[ResolvedTarget | CafeRecord] = None,
     ) -> bool:
-        """Wait for review card elements to be attached in DOM."""
-        cafe_id = target.cafe.id if target and target.cafe else ""
-        logger.debug(f"[w{self.worker_id}][{cafe_id}] waiting for review cards")
-        try:
-            await page.wait_for_selector(
-                self.config.SEL_REVIEW_ITEM,
-                timeout=self.config.REVIEW_CARDS_WAIT_MS,
-                state="attached",
-            )
-            count = await page.locator(self.config.SEL_REVIEW_ITEM).count()
-            logger.debug(
-                f"[w{self.worker_id}][{cafe_id}] review cards appeared: "
-                f"{count} cards"
-            )
-            return True
-        except Exception as err:
-            if _is_crash_error(err):
-                raise
+        """Wait for review card elements using multiple fallback selectors."""
+        cafe_id = ""
+        if isinstance(target, ResolvedTarget) and target.cafe:
+            cafe_id = target.cafe.id
+        elif isinstance(target, CafeRecord):
+            cafe_id = target.id
+
+        selectors = [
+            "div.jftiEf",
+            "div[data-review-id]",
+            "div[jsaction*='review']",
+        ]
+        for sel in selectors:
             try:
                 await page.wait_for_selector(
-                    self.config.SEL_REVIEW_ITEM_FALLBACK,
-                    timeout=15_000,
-                    state="attached",
+                    sel, timeout=30_000, state="attached"
                 )
-                count = await page.locator(
-                    self.config.SEL_REVIEW_ITEM_FALLBACK
-                ).count()
-                logger.debug(
-                    f"[w{self.worker_id}][{cafe_id}] review cards appeared: "
-                    f"{count} cards"
-                )
-                return True
-            except Exception as err2:
-                if _is_crash_error(err2):
+                count = await page.locator(sel).count()
+                if count > 0:
+                    logger.debug(
+                        f"[w{self.worker_id}][{cafe_id}] cards via {sel}: {count}"
+                    )
+                    return True
+            except Exception as err:
+                if _is_crash_error(err):
                     raise
-                logger.warning(
-                    f"[w{self.worker_id}][{cafe_id}] review cards timeout after "
-                    f"{self.config.REVIEW_CARDS_WAIT_MS}ms"
-                )
-                return False
+                continue
+        logger.warning(
+            f"[w{self.worker_id}][{cafe_id}] Review cards never appeared "
+            f"after 30s on any selector."
+        )
+        return False
 
     async def _log_no_signal_diagnostics(
         self, page: Page, cafe_id: int | str, message: str
@@ -891,6 +892,19 @@ class ScraperWorker:
             clicked = False
 
         if not clicked:
+            logger.debug(
+                f"[w{self.worker_id}][{target.cafe.id}] retrying place page load"
+            )
+            try:
+                await page.reload(wait_until="commit", timeout=15_000)
+                await page.wait_for_timeout(5_000)
+                clicked = await self._click_reviews_tab(page, target)
+            except Exception as err:
+                if _is_crash_error(err):
+                    raise
+                clicked = False
+
+        if not clicked:
             self._last_skip_reason = SkipReason.REVIEWS_TAB_FAILED
             return []
 
@@ -1037,11 +1051,16 @@ class ScraperWorker:
             raw = []
 
         reviews: list[ReviewRecord] = []
+        seen: set[tuple[str, str, str, str]] = set()
         for item in raw:
             author = (item.get("author") or "").strip() or "Anonymous"
             rating = (item.get("rating") or "").strip()
             date = (item.get("date") or "").strip()
             text = " ".join((item.get("text") or "").splitlines()).strip()
+            key = (author, date, text, rating)
+            if key in seen:
+                continue
+            seen.add(key)
             if author or text or rating:
                 reviews.append(
                     ReviewRecord(

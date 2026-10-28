@@ -52,15 +52,44 @@ async def test_appends_without_duplicate_header(
     output_file = tmp_path / "reviews.csv"
     exporter = CSVExporter(output_file)
 
+    second_review = ReviewRecord(
+        cafe_slug="cafe-another",
+        cafe_name="Another Cafe",
+        city="Tehran",
+        author="Another Author",
+        rating="4 stars",
+        date="2 days ago",
+        text="Nice place",
+    )
+
     await exporter.append_many([sample_review])
-    await exporter.append_many([sample_review])
+    await exporter.append_many([second_review])
 
     with open(output_file, mode="r", encoding="utf-8-sig") as f:
         reader = list(csv.reader(f))
         assert len(reader) == 3
         assert reader[0] == CSVExporter.COLUMNS
         assert reader[1] == sample_review.to_csv_row()
-        assert reader[2] == sample_review.to_csv_row()
+        assert reader[2] == second_review.to_csv_row()
+
+
+@pytest.mark.asyncio
+async def test_exporter_dedupes_same_review(tmp_path: Path) -> None:
+    """Verify that identical reviews within the same run are deduplicated."""
+    exporter = CSVExporter(tmp_path / "out.csv")
+    r = ReviewRecord(
+        cafe_slug="s",
+        cafe_name="n",
+        city="c",
+        author="a",
+        rating="5",
+        date="d",
+        text="t",
+    )
+    n = await exporter.append_many([r, r])
+    assert n == 2
+    lines = (tmp_path / "out.csv").read_text(encoding="utf-8-sig").splitlines()
+    assert len(lines) == 2  # header + 1 data row
 
 
 @pytest.mark.asyncio

@@ -76,6 +76,7 @@ class CSVExporter:
         self.output_path = Path(output_path)
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
+        self._seen: set[tuple[str, str, str, str]] = set()
 
     async def append_many(self, reviews: Iterable[ReviewRecord]) -> int:
         """Append review records to the CSV file safely under an asyncio lock.
@@ -100,13 +101,24 @@ class CSVExporter:
             with open(
                 self.output_path, mode="a", encoding="utf-8-sig", newline=""
             ) as f:
-                writer = csv.writer(f)
+                writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
                 if write_header:
                     writer.writerow(self.COLUMNS)
+                written = 0
                 for review in review_list:
+                    key = (
+                        review.cafe_slug,
+                        review.author,
+                        review.date,
+                        review.text,
+                    )
+                    if key in self._seen:
+                        continue
+                    self._seen.add(key)
                     writer.writerow(review.to_csv_row())
+                    written += 1
 
         logger.debug(
-            f"Exported {len(review_list)} reviews to {self.output_path}"
+            f"Wrote {written}/{len(review_list)} new rows to {self.output_path}"
         )
         return len(review_list)
