@@ -132,6 +132,7 @@ async def test_worker_scrape_no_place_match(
 
     h1_loc = AsyncMock()
     h1_loc.is_visible = AsyncMock(return_value=True)
+    h1_loc.inner_text = AsyncMock(return_value="Different Place")
 
     links_loc = AsyncMock()
     links_loc.count = AsyncMock(return_value=0)
@@ -158,6 +159,54 @@ async def test_worker_scrape_no_place_match(
 
 
 @pytest.mark.asyncio
+async def test_worker_handles_results_h1_as_search_results_page(
+    sample_target: ResolvedTarget,
+) -> None:
+    """Verify that h1='Results' treats page as search results list, not single place."""
+    pool: asyncio.Queue = asyncio.Queue()
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.url = "https://www.google.com/maps/search/test"
+    mock_page.goto = AsyncMock()
+    mock_page.wait_for_timeout = AsyncMock()
+
+    h1_loc = AsyncMock()
+    h1_loc.is_visible = AsyncMock(return_value=True)
+    h1_loc.inner_text = AsyncMock(return_value="Different Place")
+    h1_loc.inner_text = AsyncMock(return_value="Results")
+
+    matched_link = AsyncMock()
+    matched_link.get_attribute = AsyncMock(
+        return_value="/maps/place/Cafe/data=!4m2!3m1!1s0x0:0x0!3d35.7592!4d51.4089"
+    )
+    matched_link.click = AsyncMock()
+
+    links_loc = MagicMock()
+    links_loc.count = AsyncMock(return_value=1)
+    links_loc.nth = MagicMock(return_value=matched_link)
+
+    def mock_locator(sel: str) -> MagicMock:
+        loc = MagicMock()
+        if sel == "h1":
+            loc.first = h1_loc
+        elif "maps/place" in sel:
+            return links_loc
+        else:
+            loc.first = AsyncMock(is_visible=AsyncMock(return_value=False))
+        return loc
+
+    mock_page.locator = MagicMock(side_effect=mock_locator)
+    await pool.put(mock_page)
+
+    mock_context = MagicMock()
+    worker = ScraperWorker(context=mock_context, worker_id=5, page_pool=pool)
+    worker._click_reviews_tab = AsyncMock(return_value=False)
+
+    await worker.scrape(sample_target)
+    assert matched_link.click.called
+
+
+@pytest.mark.asyncio
 async def test_worker_scrape_success(sample_target: ResolvedTarget) -> None:
     """Verify successful scrape extracts reviews and returns ReviewRecord list."""
     pool: asyncio.Queue = asyncio.Queue()
@@ -171,6 +220,7 @@ async def test_worker_scrape_success(sample_target: ResolvedTarget) -> None:
 
     h1_loc = AsyncMock()
     h1_loc.is_visible = AsyncMock(return_value=True)
+    h1_loc.inner_text = AsyncMock(return_value="عمارت نیلی")
 
     reviews_tab = AsyncMock()
     reviews_tab.is_visible = AsyncMock(return_value=True)

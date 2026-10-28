@@ -16,6 +16,7 @@ from src.resolver import (
     extract_coordinates_from_href,
     extract_coordinates_from_url,
     haversine_distance,
+    names_look_same,
 )
 
 
@@ -219,3 +220,45 @@ def test_distance_constants() -> None:
     """Verify strict and loose match distance thresholds."""
     assert MAX_MATCH_DISTANCE_STRICT_M == 500.0
     assert MAX_MATCH_DISTANCE_LOOSE_M == 800.0
+
+
+@pytest.mark.parametrize(
+    ("persian_name", "latin_name"),
+    [
+        ("کافه سمن", "Saman Cafe"),
+        ("کافه ساعدی نیا (فرمانیه)", "Saedinia Cafe"),
+        ("کافه ایمپرسو", "Impresso"),
+        ("کافه ویش", "Wish Cafe"),
+        ("کافه شانیان", "Shanyan coffee"),
+        ("عمارت حنا", "Hana House"),
+        ("کافه هیروکام", "Hero Come Cafe"),
+        ("کافه رستوران ورسی لانژ", "Verci Lounge"),
+        ("کافه عمارت مِسینه", "Emarate Mesine"),
+        ("کافه رستوران بورسا کباب اوی", "Bursa Kebap Evi"),
+        ("کافه ایتی ایت 88", "Eighty Eight Restaurant & Cafe"),
+        ("باقلوا علی کنتیا", "Ali Konteya Baklava"),
+    ],
+)
+def test_names_look_same_matches(persian_name: str, latin_name: str) -> None:
+    """Verify Persian-Latin name pairs correctly match."""
+    assert names_look_same(persian_name, latin_name) is True
+    assert names_look_same(latin_name, persian_name) is True
+
+
+@pytest.mark.parametrize(
+    ("name_a", "name_b"),
+    [
+        ("کافه فرسه", "Cafe 43"),
+        ("کافه نادری", "کافه گلها"),
+        ("کافه بهار", "کافه نیلوفر"),
+        ("باقلوا علی کنتیا", "Haj Khalifa"),
+        ("A", "A"),
+        ("ab", "ab"),
+        ("کافه", "کافه"),
+        ("", ""),
+    ],
+)
+def test_names_look_same_mismatches(name_a: str, name_b: str) -> None:
+    """Verify distinct or rejected short names do not match."""
+    assert names_look_same(name_a, name_b) is False
+    assert names_look_same(name_b, name_a) is False

@@ -34,6 +34,9 @@ from src.resolver import (
     extract_coords_from_href,
     extract_coords_from_url,
     haversine_m,
+    names_look_same,
+    normalize_venue_name as _normalize_name,
+    transliterate_persian_word as _transliterate_word,
 )
 
 
@@ -102,141 +105,6 @@ class SkipReason:
     PAGE_NAV_FAILED = "navigation_to_result_url_failed"
     EXCEPTION = "exception"
     NO_REVIEWS = "zero_reviews"
-
-
-GENERIC_STOP_WORDS: frozenset[str] = frozenset(
-    {"cafe", "coffee", "kafe", "کافه", "قهوه", "tehran", "تهران"}
-)
-
-_TRANSLATION_MAP: dict[str, list[str]] = {
-    "عمارت": ["mansion", "emarat"],
-    "نیلی": ["nili"],
-    "باغ": ["garden", "bagh"],
-    "خانه": ["house", "khaneh"],
-    "سرای": ["saray", "house"],
-    "مجموعه": ["complex"],
-    "رستوران": ["restaurant"],
-}
-
-_PERSIAN_TO_LATIN: dict[str, str] = {
-    "ا": "a",
-    "آ": "a",
-    "ب": "b",
-    "پ": "p",
-    "ت": "t",
-    "ث": "s",
-    "ج": "j",
-    "چ": "ch",
-    "ح": "h",
-    "خ": "kh",
-    "د": "d",
-    "ذ": "z",
-    "ر": "r",
-    "ز": "z",
-    "ژ": "zh",
-    "س": "s",
-    "ش": "sh",
-    "ص": "s",
-    "ض": "z",
-    "ط": "t",
-    "ظ": "z",
-    "ع": "e",
-    "غ": "gh",
-    "ف": "f",
-    "ق": "gh",
-    "ک": "k",
-    "گ": "g",
-    "ل": "l",
-    "م": "m",
-    "ن": "n",
-    "و": "o",
-    "ه": "h",
-    "ی": "i",
-    "ئ": "e",
-}
-
-
-def _normalize_name(name: str) -> str:
-    """Normalize Persian and English cafe names for comparison."""
-    if not name:
-        return ""
-    text = name.lower()
-    text = text.replace("ي", "ی").replace("ك", "ک").replace("ة", "ه")
-    text = text.replace("\u200c", " ")
-    text = re.sub(r"[^\w\s]", " ", text)
-    return " ".join(text.split())
-
-
-def _transliterate_word(word: str) -> str:
-    """Transliterate a single Persian word phonetically to Latin."""
-    return "".join(_PERSIAN_TO_LATIN.get(c, c) for c in word)
-
-
-def _latinize_words(text: str) -> set[str]:
-    """Convert text words into a set of Latin translations and transliterations."""
-    norm = _normalize_name(text)
-    words = [w for w in norm.split() if w not in GENERIC_STOP_WORDS]
-    results: set[str] = set()
-    for w in words:
-        if w in _TRANSLATION_MAP:
-            results.update(_TRANSLATION_MAP[w])
-        trans = _transliterate_word(w)
-        if trans:
-            results.add(trans)
-        results.add(w)
-    return results
-
-
-def _ngram_match(s1: str, s2: str, n: int = 3) -> float:
-    """Calculate character n-gram Jaccard similarity between two strings."""
-    if not s1 or not s2:
-        return 0.0
-    if s1 == s2:
-        return 1.0
-    if len(s1) < n or len(s2) < n:
-        return 1.0 if s1 == s2 else 0.0
-
-    ngrams1 = {s1[i : i + n] for i in range(len(s1) - n + 1)}
-    ngrams2 = {s2[i : i + n] for i in range(len(s2) - n + 1)}
-    intersection = len(ngrams1 & ngrams2)
-    union = len(ngrams1 | ngrams2)
-    return intersection / union if union > 0 else 0.0
-
-
-def names_look_same(name1: str, name2: str) -> bool:
-    """Determine whether two cafe names refer to the same venue.
-
-    Handles Persian Unicode variations, translation of architectural terms
-    (e.g., 'عمارت' -> 'Mansion'), phonetic transliteration, and short-word
-    rejection.
-    """
-    norm1 = _normalize_name(name1)
-    norm2 = _normalize_name(name2)
-    if not norm1 or not norm2:
-        return False
-
-    # Reject short words or names consisting only of generic words
-    meaningful1 = [
-        w for w in norm1.split() if w not in GENERIC_STOP_WORDS and len(w) >= 3
-    ]
-    meaningful2 = [
-        w for w in norm2.split() if w not in GENERIC_STOP_WORDS and len(w) >= 3
-    ]
-    if not meaningful1 or not meaningful2:
-        return False
-
-    if norm1 == norm2:
-        return True
-
-    lat1 = {
-        t for t in _latinize_words(name1) if t not in GENERIC_STOP_WORDS and len(t) >= 3
-    }
-    lat2 = {
-        t for t in _latinize_words(name2) if t not in GENERIC_STOP_WORDS and len(t) >= 3
-    }
-
-    common = lat1 & lat2
-    return bool(common)
 
 
 def _is_crash_error(err: BaseException) -> bool:
@@ -604,13 +472,21 @@ class ScraperWorker:
 
         # Detect whether we are on a single place page or search results list
         is_place = False
+        h1_text = ""
         logger.debug(f"[w{self.worker_id}][{target.cafe.id}] checking h1")
         try:
             h1_el = page.locator(self.config.SEL_PLACE_H1).first
             if await h1_el.is_visible(timeout=1000):
+                val = await h1_el.inner_text(timeout=1000)
+                h1_text = val.strip() if isinstance(val, str) else ""
                 is_place = True
-        except Exception:
-            pass
+        except Exception as err:
+            if _is_crash_error(err):
+                raise
+
+        if h1_text.lower() in ("results", "نتایج"):
+            is_place = False
+
         logger.debug(
             f"[w{self.worker_id}][{target.cafe.id}] is_place={is_place}"
         )
@@ -698,9 +574,17 @@ class ScraperWorker:
                 return []
         else:
             try:
-                h1_text = await page.locator(
+                val = await page.locator(
                     self.config.SEL_PLACE_H1
                 ).first.inner_text(timeout=2000)
+                h1_text = val.strip() if isinstance(val, str) else ""
+                if h1_text.lower() in ("results", "نتایج"):
+                    logger.warning(
+                        f"Place check remained on search results ('{h1_text}') "
+                        f"for {target.cafe.slug}"
+                    )
+                    self._last_skip_reason = SkipReason.PAGE_SIGNAL_NONE
+                    return []
                 if not names_look_same(target.cafe.name, h1_text):
                     logger.warning(
                         f"Name mismatch for {target.cafe.slug}: "
@@ -708,8 +592,9 @@ class ScraperWorker:
                     )
                     self._last_skip_reason = SkipReason.PLACE_NAME_MISMATCH
                     return []
-            except Exception:
-                pass
+            except Exception as err:
+                if _is_crash_error(err):
+                    raise
 
         # Click reviews tab
         try:
