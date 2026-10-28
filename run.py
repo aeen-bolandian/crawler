@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 from pathlib import Path
 import random
 import sys
@@ -64,6 +65,21 @@ def _configure_logging(level: str = "INFO") -> None:
         import logging
 
         logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO))
+
+
+def shard_of(slug: str, num_shards: int) -> int:
+    """Compute the deterministic shard index for a cafe slug using MD5.
+
+    Args:
+        slug: Unique cafe identifier slug.
+        num_shards: Total number of shards.
+
+    Returns:
+        Shard index in the range [0, num_shards - 1].
+    """
+    if num_shards < 1:
+        raise ValueError("num_shards must be at least 1")
+    return int(hashlib.md5(slug.encode("utf-8")).hexdigest(), 16) % num_shards
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -129,6 +145,18 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Rotate browser tab after N cafes",
     )
     parser.add_argument(
+        "--shard-id",
+        type=int,
+        default=0,
+        help="Zero-based index of this shard",
+    )
+    parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Total number of shards for distributed crawling",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -138,6 +166,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.workers < 1:
         raise ValueError("--workers must be at least 1")
+    if args.num_shards < 1:
+        raise ValueError("--num-shards must be at least 1")
+    if args.shard_id < 0 or args.shard_id >= args.num_shards:
+        raise ValueError(
+            f"--shard-id must be between 0 and {args.num_shards - 1} "
+            f"(got {args.shard_id})"
+        )
     return args
 
 
@@ -156,6 +191,8 @@ class CrawlerPipeline:
         retry_skipped: bool = False,
         retry_slugs: Optional[set[str]] = None,
         max_cafes_per_tab: int = 10,
+        shard_id: int = 0,
+        num_shards: int = 1,
     ) -> None:
         """Initialize the crawler pipeline with dependencies.
 
@@ -170,6 +207,8 @@ class CrawlerPipeline:
             retry_skipped: Whether to operate in retry-skipped mode.
             retry_slugs: Slugs to retry if in retry_skipped mode.
             max_cafes_per_tab: Max cafes to process before rotating tab.
+            shard_id: Shard index (0-based) for distributed crawling.
+            num_shards: Total number of shards (1 = disabled).
         """
         self.loader = loader
         self.scraper = scraper
@@ -181,6 +220,8 @@ class CrawlerPipeline:
         self.retry_skipped = retry_skipped
         self.retry_slugs = retry_slugs or set()
         self.max_cafes_per_tab = max(1, max_cafes_per_tab)
+        self.shard_id = shard_id
+        self.num_shards = num_shards
 
     async def _process_one(
         self, worker: ScraperWorker, cafe: CafeRecord
@@ -227,6 +268,17 @@ class CrawlerPipeline:
             ]
             logger.info(
                 f"Standard mode: {len(pending)} pending cafes out of {len(all_cafes)}."
+            )
+
+        if self.num_shards > 1:
+            pending = [
+                c
+                for c in pending
+                if shard_of(c.slug, self.num_shards) == self.shard_id
+            ]
+            logger.info(
+                f"Shard {self.shard_id}/{self.num_shards}: "
+                f"{len(pending)} cafes assigned."
             )
 
         if limit is not None and limit > 0:
@@ -337,6 +389,8 @@ async def _main_async(args: argparse.Namespace) -> int:
                     retry_skipped=args.retry_skipped,
                     retry_slugs=retry_slugs,
                     max_cafes_per_tab=args.max_cafes_per_tab,
+                    shard_id=args.shard_id,
+                    num_shards=args.num_shards,
                 )
                 await pipeline.run(limit=args.limit)
     except KeyboardInterrupt:
@@ -352,7 +406,11 @@ async def _main_async(args: argparse.Namespace) -> int:
 
 def main() -> None:
     """CLI orchestrator entrypoint."""
-    args = parse_args()
+    try:
+        args = parse_args()
+    except ValueError as err:
+        logger.error(f"Invalid CLI arguments: {err}")
+        sys.exit(2)
     exit_code = asyncio.run(_main_async(args))
     sys.exit(exit_code)
 

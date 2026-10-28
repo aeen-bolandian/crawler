@@ -14,6 +14,7 @@ Async, resumable, Playwright-based scraper for extracting Google Maps reviews fr
 - **Resumable checkpointing** — only cafes with ≥ 1 review are marked processed
 - **Skip reporting** — every skipped cafe recorded with a reason code (`data/skipped_cafes.csv`)
 - **Retry mode** — `--retry-skipped` re-attempts only previously failed cafes
+- **Distributed sharding** — `--shard-id` and `--num-shards` distribute cafes across machines via deterministic MD5 hashing
 - **CSV output** — UTF-8 with BOM for Excel compatibility
 
 ---
@@ -111,6 +112,21 @@ python run.py --db cafes_cafe.db --workers 4 \
   --cdp-url http://localhost:9223
 ```
 
+### Distributed crawl across multiple machines
+
+Use `--shard-id` and `--num-shards` to split cafes evenly across multiple machines using deterministic MD5 hashing (no duplicates across shards):
+
+**Machine 0:**
+```bash
+python run.py --db cafes_cafe.db --workers 4 --shard-id 0 --num-shards 15 --output data/reviews_shard00.csv --state crawler_state_shard00.json --skipped data/skipped_shard00.csv
+```
+
+**Machine 1:**
+```bash
+python run.py --db cafes_cafe.db --workers 4 --shard-id 1 --num-shards 15 --output data/reviews_shard01.csv --state crawler_state_shard01.json --skipped data/skipped_shard01.csv
+```
+...
+
 ---
 
 ## CLI Reference
@@ -124,6 +140,9 @@ python run.py --db cafes_cafe.db --workers 4 \
 | `--skipped-input` | `None` | Input CSV for `--retry-skipped` mode |
 | `--limit` | `None` | Max cafes this run |
 | `--workers` | `4` | Concurrent workers (must equal open Maps tabs) |
+| `--shard-id` | `0` | Shard index (0-based) for distributed crawling |
+| `--num-shards` | `1` | Total number of shards (1 = unshared) |
+| `--max-cafes-per-tab` | `10` | Rotate browser tab after N cafes |
 | `--cdp-url` | `http://localhost:9222` | Chrome debug endpoint |
 | `--headful` | `False` | Use headful browser if CDP fails |
 | `--retry-skipped` | `False` | Only retry cafes from `--skipped-input` |

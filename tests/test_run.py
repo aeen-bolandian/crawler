@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
+import hashlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from run import CrawlerPipeline, parse_args
+from run import CrawlerPipeline, parse_args, shard_of
 from src.db_loader import CafeRecord
 from src.exporter import ReviewRecord
 from src.scraper import ScraperWorker, SkipReason
@@ -61,6 +63,8 @@ def test_parse_args_defaults() -> None:
     assert args.headful is False
     assert args.retry_skipped is False
     assert args.max_cafes_per_tab == 10
+    assert args.shard_id == 0
+    assert args.num_shards == 1
     assert args.log_level == "INFO"
 
     custom_args = parse_args(["--max-cafes-per-tab", "5"])
@@ -358,3 +362,110 @@ async def test_pipeline_mock_full_run(
     # cafe-2 had 0 reviews -> skip_reporter called
     assert skip_reporter.record.call_count == 1
     assert state.flush.called
+
+
+def test_shard_of_deterministic() -> None:
+    """Verify same slug always maps to the exact same shard."""
+    slug = "cafe-ferdowsi-tehran"
+    shard_1 = shard_of(slug, 15)
+    shard_2 = shard_of(slug, 15)
+    assert shard_1 == shard_2
+    assert 0 <= shard_1 < 15
+    expected = int(hashlib.md5(slug.encode("utf-8")).hexdigest(), 16) % 15
+    assert shard_1 == expected
+
+
+def test_shard_of_distributes() -> None:
+    """Verify 100 slugs over 15 shards results in 4-10 cafes per shard."""
+    slugs = [f"cafe-{i}" for i in range(144, 244)]
+    counts = Counter(shard_of(s, 15) for s in slugs)
+    assert len(counts) == 15
+    for shard in range(15):
+        assert 4 <= counts[shard] <= 10
+
+
+def test_shard_id_validates() -> None:
+    """Verify --shard-id out of range raises ValueError."""
+    with pytest.raises(ValueError):
+        parse_args(["--shard-id", "-1", "--num-shards", "5"])
+    with pytest.raises(ValueError):
+        parse_args(["--shard-id", "5", "--num-shards", "5"])
+    with pytest.raises(ValueError):
+        parse_args(["--shard-id", "10", "--num-shards", "5"])
+    # Boundary valid values
+    args_0 = parse_args(["--shard-id", "0", "--num-shards", "5"])
+    assert args_0.shard_id == 0
+    args_4 = parse_args(["--shard-id", "4", "--num-shards", "5"])
+    assert args_4.shard_id == 4
+
+
+def test_num_shards_validates() -> None:
+    """Verify --num-shards < 1 raises ValueError."""
+    with pytest.raises(ValueError):
+        parse_args(["--num-shards", "0"])
+    with pytest.raises(ValueError):
+        parse_args(["--num-shards", "-3"])
+    with pytest.raises(ValueError):
+        shard_of("some-slug", 0)
+
+
+@pytest.mark.asyncio
+async def test_filter_by_shard() -> None:
+    """Verify mock loader with 30 cafes over 3 shards assigns ~10 cafes each."""
+    thirty_cafes = [
+        CafeRecord(
+            slug=f"cafe-{i}",
+            name=f"Cafe {i}",
+            address=f"Address {i}",
+            city="Tehran",
+            neighborhood="Center",
+            latitude=35.7000 + (i % 50) * 0.001,
+            longitude=51.4000 + (i % 50) * 0.001,
+            phone=None,
+            id=i,
+        )
+        for i in range(15, 45)
+    ]
+
+    assigned_shards: dict[int, list[str]] = {0: [], 1: [], 2: []}
+
+    for s_id in range(3):
+        loader = MagicMock()
+        loader.iter_cafes = MagicMock(return_value=iter(thirty_cafes))
+
+        state = MagicMock()
+        state.is_processed = MagicMock(return_value=False)
+        state.flush = AsyncMock()
+
+        exporter = MagicMock()
+        skip_reporter = MagicMock()
+        scraper = MagicMock()
+        scraper.page_pool = asyncio.Queue()
+
+        pipeline = CrawlerPipeline(
+            loader=loader,
+            scraper=scraper,
+            exporter=exporter,
+            state=state,
+            skip_reporter=skip_reporter,
+            workers=1,
+            shard_id=s_id,
+            num_shards=3,
+        )
+
+        async def record_process(worker: MagicMock, cafe: CafeRecord) -> None:
+            assigned_shards[s_id].append(cafe.slug)
+
+        pipeline._process_one = record_process  # type: ignore[assignment]
+        await pipeline.run()
+
+    # Each shard has roughly 10 cafes (8 to 12)
+    for s_id in range(3):
+        assert 7 <= len(assigned_shards[s_id]) <= 13
+
+    # Total assigned equals 30 and no overlap across shards
+    all_assigned = (
+        assigned_shards[0] + assigned_shards[1] + assigned_shards[2]
+    )
+    assert len(all_assigned) == 30
+    assert len(set(all_assigned)) == 30
