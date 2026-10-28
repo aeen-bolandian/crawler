@@ -469,3 +469,37 @@ async def test_filter_by_shard() -> None:
     )
     assert len(all_assigned) == 30
     assert len(set(all_assigned)) == 30
+
+
+@pytest.mark.asyncio
+async def test_pipeline_fail_fast_on_zero_shard_cafes() -> None:
+    """Verify CrawlerPipeline.run raises SystemExit(1) when 0 cafes match shard."""
+    loader = MagicMock()
+    # No cafes matching shard
+    loader.iter_cafes = MagicMock(return_value=iter([]))
+
+    state = MagicMock()
+    state.is_processed = MagicMock(return_value=False)
+    state.flush = AsyncMock()
+
+    exporter = MagicMock()
+    skip_reporter = MagicMock()
+    scraper = MagicMock()
+    scraper.page_pool = asyncio.Queue()
+
+    pipeline = CrawlerPipeline(
+        loader=loader,
+        scraper=scraper,
+        exporter=exporter,
+        state=state,
+        skip_reporter=skip_reporter,
+        workers=1,
+        shard_id=0,
+        num_shards=3,
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await pipeline.run()
+
+    assert exc_info.value.code == 1
+

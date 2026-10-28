@@ -9,7 +9,28 @@ NUM_SHARDS="${2:?Usage: ./run_shard_with_restart.sh <shard_id> <num_shards>}"
 
 CHUNK=50
 NUM_CHUNKS=10
-SLEEP_BETWEEN=60
+SLEEP_BETWEEN=600
+WORKERS=2
+
+# Auto-detect database file
+DB=""
+if [ -f "cafes_cafe.db" ]; then
+    DB="cafes_cafe.db"
+elif ls cafes_cafe_shard*.db 1>/dev/null 2>&1; then
+    DB=$(ls cafes_cafe_shard*.db 2>/dev/null | head -1)
+    echo "📁 Auto-detected database: $DB"
+elif ls *.db 1>/dev/null 2>&1; then
+    DB=$(ls *.db 2>/dev/null | head -1)
+    echo "⚠ Using database (auto-detected): $DB"
+else
+    echo "❌ ERROR: No database file (*.db) found in project root."
+    exit 1
+fi
+
+echo "📁 Database: $DB"
+echo "🔢 Shard: $SHARD_ID/$NUM_SHARDS"
+echo "⚙️  Workers: $WORKERS"
+echo "⏸  Sleep between chunks: ${SLEEP_BETWEEN}s"
 
 OUTPUT="data/reviews_shard$(printf '%02d' $SHARD_ID).csv"
 STATE="crawler_state_shard$(printf '%02d' $SHARD_ID).json"
@@ -30,7 +51,7 @@ for chunk in $(seq 1 $NUM_CHUNKS); do
         "https://www.google.com/maps" &
     sleep 5
 
-    for i in 1 2 3; do
+    for i in 1; do
         curl -s -X PUT "http://localhost:9222/json/new?https://www.google.com/maps" >/dev/null
         sleep 1
     done
@@ -39,8 +60,8 @@ for chunk in $(seq 1 $NUM_CHUNKS); do
     sleep 10
 
     ./.venv/bin/python run.py \
-        --db cafes_cafe.db \
-        --workers 4 \
+        --db "$DB" \
+        --workers "$WORKERS" \
         --shard-id "$SHARD_ID" --num-shards "$NUM_SHARDS" \
         --output "$OUTPUT" \
         --state "$STATE" \

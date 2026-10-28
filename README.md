@@ -59,10 +59,10 @@ In the Chrome browser window that opens:
 - Log into your Google account.
 - Accept any Google consent dialogs if prompted.
 
-### 6. Open 4 Google Maps tabs
+### 6. Open 2 Google Maps tabs
 
-The scraper uses 4 concurrent workers and attaches to existing open tabs:
-- Ensure you have **at least 4 tabs** open to `https://www.google.com/maps`.
+The scraper uses 2 concurrent workers and attaches to existing open tabs:
+- Ensure you have **at least 2 tabs** open to `https://www.google.com/maps`.
 - Wait until each map is fully loaded (not blank, not stuck on consent).
 - Leave Chrome running in the background.
 
@@ -77,6 +77,8 @@ Run the helper script with your assigned shard number `N` (e.g. `0` if you were 
 > **Note:** Replace `N` with your assigned shard number (`0` to `14`).
 
 The script automatically processes your shard in chunks of 50 cafes, restarts Chrome between chunks to prevent memory bloat, checkpointing progress after each cafe.
+
+> **Note:** The script uses **2 workers** (2 concurrent Maps tabs) and waits **10 minutes between chunks** to avoid Google's rate limiter. If you still see frequent `no_page_signal` errors, stop the crawl (Ctrl+C), wait 30-60 minutes, then re-run the same command.
 
 ### 8. Get your output CSV
 

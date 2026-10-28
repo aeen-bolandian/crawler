@@ -287,6 +287,14 @@ class CrawlerPipeline:
                 f"Shard {self.shard_id}/{self.num_shards}: "
                 f"{len(pending)} cafes assigned."
             )
+            if len(pending) == 0:
+                logger.error(
+                    f"ERROR: Shard {self.shard_id}/{self.num_shards} assigned 0 cafes. "
+                    f"Possible causes:"
+                    f"\n  1. The database file does not match the shard you passed."
+                    f"\n  2. All cafes in this shard were already processed."
+                )
+                raise SystemExit(1)
 
         if limit is not None and limit > 0:
             pending = pending[:limit]
