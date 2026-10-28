@@ -722,7 +722,7 @@ async def test_scrape_recovers_via_bare_retry_on_coord_mismatch(
     mock_page.wait_for_timeout = AsyncMock()
 
     async def mock_goto(url: str, *args: object, **kwargs: object) -> None:
-        if "query=" in url:
+        if "/@" in url:
             # Bare retry navigates to correct location
             mock_page.url = "https://www.google.com/maps/@35.7592,51.4089,17z"
 

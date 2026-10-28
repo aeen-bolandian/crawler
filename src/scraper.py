@@ -402,10 +402,21 @@ class ScraperWorker:
         from urllib.parse import quote_plus
 
         bare_query = f"{cafe.name} {cafe.city}".strip()
-        bare_url = (
-            f"https://www.google.com/maps/search/?api=1"
-            f"&query={quote_plus(bare_query)}&hl=en"
-        )
+        encoded = quote_plus(bare_query)
+        if (
+            cafe.has_coordinates
+            and cafe.latitude is not None
+            and cafe.longitude is not None
+        ):
+            bare_url = (
+                f"https://www.google.com/maps/search/{encoded}"
+                f"/@{cafe.latitude},{cafe.longitude},17z?hl=en"
+            )
+        else:
+            bare_url = (
+                f"https://www.google.com/maps/search/?api=1"
+                f"&query={encoded}&hl=en"
+            )
         logger.debug(
             f"[w{self.worker_id}][{cafe.id}] retry with bare query: "
             f"{bare_query!r}"
