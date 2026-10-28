@@ -62,3 +62,8 @@ secrets.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Distribution archives
+data/shards/
+data/shards.zip
+*.zip

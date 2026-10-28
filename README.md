@@ -1,243 +1,133 @@
 # Google Maps Review Scraper
 
-Async, resumable, Playwright-based scraper for extracting Google Maps reviews for cafes stored in a SQLite database. Attaches to an existing Chrome debug session via CDP to preserve your logged-in Google account, validates results by coordinates and name to avoid scraping the wrong venue, and streams reviews to CSV.
+Run one command, get a CSV of Google Maps reviews for your assigned cafe shard.
 
-## Features
+---
 
-- Async multi-worker scraping (N concurrent workers)
-- CDP-based: attaches to Chrome via --remote-debugging-port=9222 (preserves Google login)
-- Tab pooling: reuses user-opened Maps tabs (avoids blank-page problem in CDP)
-- Auto tab rotation: rotates tab every 10 cafes to prevent Chrome crash/OOM
-- Coordinate validation: haversine check with 500m strict / 800m loose thresholds
-- Persian ↔ Latin name fallback: cross-script transliteration and n-gram matching
-- Rate-limit detection: pauses all workers 60s when google.com/sorry detected or 3 consecutive goto timeouts
-- Retry logic: goto retries 3 times on timeout before skipping
-- Resumable checkpointing: only cafes with >=1 review are marked processed
-- Skip reporting: every skipped cafe recorded with a reason code
-- Retry mode: --retry-skipped re-attempts only previously failed cafes
-- Sharding: --shard-id / --num-shards hash-based distribution across machines
-- CSV output: UTF-8 with BOM for Excel compatibility
+## What You Need
 
-## Prerequisites
+- **Python 3.10+**
+- **Google Chrome** installed
+- **A Google account** (to log into Google Maps in Chrome)
+- **Your personal `cafes_cafe.db` shard** (provided separately by the project owner)
+- **Your assigned shard number N** (from `0` to `14`, for 15 total shards)
 
-- Python 3.10+
-- Google Chrome installed
-- A Google account logged into Google Maps
-- Chrome debug session started manually
+---
 
-## Installation
+## Step-by-Step Setup
 
-1. Clone the repository:
-   git clone git@github.com:aeen-bolandian/crawler.git
-   cd crawler
+### 1. Clone the repository
 
-2. Create virtual environment:
-   python3 -m venv .venv
-   source .venv/bin/activate
+```bash
+git clone git@github.com:aeen-bolandian/crawler.git
+cd crawler
+```
 
-3. Install dependencies:
-   pip install -r requirements.txt
+### 2. Create virtual environment and install dependencies
 
-4. Install Playwright Chromium (fallback browser):
-   playwright install chromium
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+```
 
-## Chrome Debug Setup (REQUIRED)
+### 3. Place your `cafes_cafe.db` in the project root
 
-The scraper attaches to a running Chrome instance. You MUST start Chrome in debug mode before running the scraper.
+Copy the SQLite file you received into the root directory of this repository:
 
-1. Close all regular Chrome windows:
-   pkill -f chrome || true
-   sleep 2
+```bash
+# Verify the database is in the root directory
+ls -la cafes_cafe.db
+```
 
-2. Launch Chrome with debug port:
-   google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug-gmap &
+### 4. Start Chrome with remote debugging
 
-3. In that Chrome window:
-   - Log in to a Google account
-   - Open exactly N tabs at https://www.google.com/maps (N = --workers, default 4)
-   - Wait until each map is fully visible (not blank, not a consent page)
-   - Leave the tabs open — the crawler reuses them
+Close any existing Chrome instances first, then launch with debug port `9222`:
 
-4. Verify CDP is reachable:
-   curl -s http://localhost:9222/json/version
+```bash
+# On Linux:
+google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/chrome-debug-profile" "https://www.google.com/maps" &
 
-You should see JSON with "Browser": "Chrome/...".
+# On macOS:
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --user-data-dir="$HOME/chrome-debug-profile" "https://www.google.com/maps" &
+```
 
-## Database Setup
+### 5. Log into Google Maps
 
-Place your cafes_cafe.db (SQLite) in the project root:
+In the Chrome browser window that opens:
+- Log into your Google account.
+- Accept any Google consent dialogs if prompted.
 
-Required table: cafes_cafe
-Required columns: id, slug, name, address, city, neighborhood, latitude, longitude, phone, approval_status
-Optional columns (improved matching): search_address, search_name, search_city
+### 6. Open 4 Google Maps tabs
 
-Verify schema:
-sqlite3 cafes_cafe.db "PRAGMA table_info(cafes_cafe);"
+The scraper uses 4 concurrent workers and attaches to existing open tabs:
+- Ensure you have **at least 4 tabs** open to `https://www.google.com/maps`.
+- Wait until each map is fully loaded (not blank, not stuck on consent).
+- Leave Chrome running in the background.
 
-## Usage
+### 7. Run the crawler
 
-### Single machine (all approved cafes)
+Run the helper script with your assigned shard number `N` (e.g. `0` if you were assigned shard 0) and total shards `15`:
 
-./.venv/bin/python run.py --db cafes_cafe.db --workers 4
+```bash
+./run_shard_with_restart.sh N 15
+```
 
-### Limit to first N cafes
+> **Note:** Replace `N` with your assigned shard number (`0` to `14`).
 
-./.venv/bin/python run.py --db cafes_cafe.db --workers 4 --limit 50
+The script automatically processes your shard in chunks of 50 cafes, restarts Chrome between chunks to prevent memory bloat, checkpointing progress after each cafe.
 
-### Resume automatically (state is preserved)
+### 8. Get your output CSV
 
-./.venv/bin/python run.py --db cafes_cafe.db --workers 4
+When the script finishes, your reviews are saved under `data/`:
+- `data/reviews_shardNN.csv` (e.g., `data/reviews_shard00.csv`)
+- `data/skipped_shardNN.csv` (optional skip log)
 
-### Retry only previously skipped cafes
+---
 
-./.venv/bin/python run.py --db cafes_cafe.db --workers 4 \
-  --retry-skipped \
-  --skipped-input data/skipped_cafes.csv
+## Run Command (Quick Reference)
 
-### Distributed across 15 machines
+```bash
+./run_shard_with_restart.sh N 15
+```
 
-Each machine runs a different shard:
+Replace `N` with your assigned shard number (`0` through `14`).
 
-Machine 0:
-./.venv/bin/python run.py --db cafes_cafe.db --workers 4 \
-  --shard-id 0 --num-shards 15 \
-  --output data/reviews_shard00.csv \
-  --state crawler_state_shard00.json \
-  --skipped data/skipped_shard00.csv
+---
 
-Machine 1:
-./.venv/bin/python run.py --db cafes_cafe.db --workers 4 \
-  --shard-id 1 --num-shards 15 \
-  --output data/reviews_shard01.csv \
-  --state crawler_state_shard01.json \
-  --skipped data/skipped_shard01.csv
+## What You Get
 
-... and so on up to --shard-id 14.
+- `data/reviews_shardNN.csv` — **Send this back to the project owner.**
+- `data/skipped_shardNN.csv` — Optional skip log detailing venues not found or skipped.
 
-Sharding is hash-based on cafe.slug (MD5), so each cafe always lands in the same shard — no duplicates across machines.
-
-## CLI Reference
-
-| Flag | Default | Description |
-|---|---|---|
-| --db | cafes_cafe.db | SQLite database path (read-only) |
-| --output | data/google_reviews.csv | Output CSV path |
-| --state | crawler_state.json | Checkpoint state JSON |
-| --skipped | data/skipped_cafes.csv | Skip report CSV |
-| --skipped-input | None | Input CSV for --retry-skipped |
-| --limit | None | Max cafes this run |
-| --workers | 4 | Concurrent workers (must equal open Maps tabs) |
-| --shard-id | 0 | This shard's index (0-based) |
-| --num-shards | 1 | Total number of shards |
-| --cdp-url | http://localhost:9222 | Chrome debug endpoint |
-| --headful | False | Use headful browser if CDP fails |
-| --retry-skipped | False | Only retry cafes from --skipped-input |
-| --log-level | INFO | Logging verbosity |
-
-## Output Schema
-
-### data/google_reviews.csv
-
-| Column | Example |
-|---|---|
-| cafe_slug | 1e11ca0c-976e-4aad-a651-b9c68852f16a |
-| cafe_name | عمارت نیلی |
-| city | تهران |
-| author | Ali S. M |
-| rating | 5 stars |
-| date | 2 months ago |
-| text | Full review body (newlines collapsed) |
-
-### data/skipped_cafes.csv
-
-| Column | Example |
-|---|---|
-| cafe_id | 188 |
-| cafe_slug | 1e11ca0c-... |
-| cafe_name | عمارت نیلی |
-| reason | place_name_mismatch |
-
-Skip reasons: no_page_signal, no_result_matched_within_threshold, place_coords_mismatch, place_name_mismatch, reviews_tab_could_not_be_clicked, review_cards_never_appeared, navigation_to_result_url_failed, exception, zero_reviews.
-
-### crawler_state.json
-
-{"processed_slugs": ["slug1", "slug2", ...]}
-
-## Batch Running (recommended for large crawls)
-
-Run each shard in 100-cafe chunks with 5-minute pauses between chunks to avoid rate limiting. Example script (run_shard.sh):
-
-#!/usr/bin/env bash
-SHARD_ID="${1:?Usage: ./run_shard.sh <shard_id> <num_shards>}"
-NUM_SHARDS="${2:?Usage: ./run_shard.sh <shard_id> <num_shards>}"
-for chunk in $(seq 1 5); do
-    ./.venv/bin/python run.py --db cafes_cafe.db --workers 4 \
-        --shard-id "$SHARD_ID" --num-shards "$NUM_SHARDS" \
-        --output "data/reviews_shard$(printf '%02d' $SHARD_ID).csv" \
-        --state "crawler_state_shard$(printf '%02d' $SHARD_ID).json" \
-        --skipped "data/skipped_shard$(printf '%02d' $SHARD_ID).csv" \
-        --limit 100 --log-level INFO
-    [ "$chunk" -lt 5 ] && sleep 300
-done
-
-Usage:
-chmod +x run_shard.sh
-./run_shard.sh 0 15
-
-## Merging Shard Outputs
-
-After all 15 shards finish:
-
-python3 -c "
-import csv, glob
-shards = sorted(glob.glob('data/reviews_shard[0-9][0-9].csv'))
-all_rows = []
-columns = None
-for shard in shards:
-    with open(shard, encoding='utf-8-sig') as f:
-        reader = csv.DictReader(f)
-        if columns is None:
-            columns = reader.fieldnames
-        rows = list(reader)
-        all_rows.extend(rows)
-    print(f'{shard}: {len(rows)} reviews')
-seen = set()
-unique = []
-for row in all_rows:
-    key = (row['cafe_slug'], row['author'], row['date'], row['text'])
-    if key not in seen:
-        seen.add(key)
-        unique.append(row)
-with open('data/google_reviews.csv', 'w', encoding='utf-8-sig', newline='') as f:
-    writer = csv.DictWriter(f, fieldnames=columns)
-    writer.writeheader()
-    writer.writerows(unique)
-print(f'Merged: {len(unique)} unique reviews')
-"
-
-## Architecture
-
-Pipeline flow:
-DatabaseLoader -> LocationResolver -> ScraperWorker (xN via tab pool) -> CSVExporter
-
-Validation gates (any -> accept):
-1. Clicked-result coordinates (href !3d/!4d) — 800m loose threshold
-2. Page-URL coordinates (/@lat,lng) — 500m strict threshold
-3. Name fallback — Persian/Latin transliteration + n-gram matching
-
-Checkpointing: only cafes with >=1 review are marked processed. Failed cafes retry on next run.
+---
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| CDP endpoint unreachable | Chrome debug not running | Start Chrome with --remote-debugging-port=9222 |
-| Tabs load blank | Missing Maps tabs | Open N tabs, restart crawl |
-| Rate limit (timeouts) | Google throttling | Ctrl+C, wait 30-60 min, resume |
-| Chrome page crashed | Tab OOM after many cafes | Tabs auto-rotate every 10 cafes |
-| No result matched | Bad address or missing place | Check data/skipped_cafes.csv |
-| Page pool empty | Fewer tabs than --workers | Open more tabs or lower --workers |
+- **Chrome crash / OOM:**
+  The scraper automatically rotates tabs every 10 cafes and restarts Chrome between 50-cafe chunks. If Chrome terminates unexpectedly, simply re-run `./run_shard_with_restart.sh N 15` — state is preserved and already scraped cafes are skipped.
+- **Rate limit ("pausing all workers for 60s" or Google block):**
+  If Google temporarily slows down responses, wait 30–60 minutes, then re-run the same command. Checkpointing ensures no duplicate work.
+- **CDP endpoint unreachable (`connect ECONNREFUSED 127.0.0.1:9222`):**
+  Chrome is not running with `--remote-debugging-port=9222`. Re-run Step 4 to start Chrome in debug mode.
+- **Page signal timeout:**
+  Google Maps took longer than usual to render. The crawler will retry automatically or fall back to bare search. If your connection is slow, re-running will resume smoothly.
 
-## License
+---
 
-MIT
+## How to Send Results Back
+
+Once your shard finishes, send your output file:
+- Send `data/reviews_shardNN.csv` to the project owner via **Telegram** or **Google Drive**.
+
+---
+
+## Security: Do NOT Commit
+
+Never commit sensitive files to Git:
+- **Do NOT commit** your `cafes_cafe.db` or any `*.db` files.
+- **Do NOT commit** any output CSV files (`data/*.csv`, `*.csv`).
+- **Do NOT commit** state files (`crawler_state*.json`).
+
+All these files are strictly ignored by `.gitignore`.
