@@ -1,315 +1,242 @@
 # Google Maps Review Scraper
 
-Async, resumable, Playwright-based scraper for extracting Google Maps reviews from cafes stored in a SQLite database. Attaches to an existing Chrome debug session via CDP to preserve your logged-in Google account, validates results by coordinates to avoid scraping the wrong cafe, and streams reviews to CSV.
-
----
+Async, resumable, Playwright-based scraper for extracting Google Maps reviews for cafes stored in a SQLite database. Attaches to an existing Chrome debug session via CDP to preserve your logged-in Google account, validates results by coordinates and name to avoid scraping the wrong venue, and streams reviews to CSV.
 
 ## Features
 
-- **Async multi-worker scraping** — N concurrent workers share a cafe queue
-- **CDP-based** — attaches to Chrome via `--remote-debugging-port=9222`; preserves the logged-in Google session
-- **Tab pooling** — reuses user-opened Maps tabs (avoids blank-page problem in CDP)
-- **Coordinate validation** — haversine check with 500 m strict / 800 m loose thresholds
-- **Persian ↔ Latin name fallback** — cross-script name matching when coordinates are unavailable
-- **Resumable checkpointing** — only cafes with ≥ 1 review are marked processed
-- **Skip reporting** — every skipped cafe recorded with a reason code (`data/skipped_cafes.csv`)
-- **Retry mode** — `--retry-skipped` re-attempts only previously failed cafes
-- **Distributed sharding** — `--shard-id` and `--num-shards` distribute cafes across machines via deterministic MD5 hashing
-- **CSV output** — UTF-8 with BOM for Excel compatibility
-
----
+- Async multi-worker scraping (N concurrent workers)
+- CDP-based: attaches to Chrome via --remote-debugging-port=9222 (preserves Google login)
+- Tab pooling: reuses user-opened Maps tabs (avoids blank-page problem in CDP)
+- Auto tab rotation: rotates tab every 10 cafes to prevent Chrome crash/OOM
+- Coordinate validation: haversine check with 500m strict / 800m loose thresholds
+- Persian ↔ Latin name fallback: cross-script transliteration and n-gram matching
+- Rate-limit detection: pauses all workers 60s when google.com/sorry detected or 3 consecutive goto timeouts
+- Retry logic: goto retries 3 times on timeout before skipping
+- Resumable checkpointing: only cafes with >=1 review are marked processed
+- Skip reporting: every skipped cafe recorded with a reason code
+- Retry mode: --retry-skipped re-attempts only previously failed cafes
+- Sharding: --shard-id / --num-shards hash-based distribution across machines
+- CSV output: UTF-8 with BOM for Excel compatibility
 
 ## Prerequisites
 
-- **Python** 3.10+
-- **Google Chrome** installed
-- **A Google account** logged into Google Maps (Maps shows "Limited View" to anonymous users)
-- **Chrome debug session** started manually before running the scraper
-- **N Maps tabs open** in that Chrome (N = `--workers`)
-
----
+- Python 3.10+
+- Google Chrome installed
+- A Google account logged into Google Maps
+- Chrome debug session started manually
 
 ## Installation
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
-```
+1. Clone the repository:
+   git clone git@github.com:aeen-bolandian/crawler.git
+   cd crawler
 
----
+2. Create virtual environment:
+   python3 -m venv .venv
+   source .venv/bin/activate
+
+3. Install dependencies:
+   pip install -r requirements.txt
+
+4. Install Playwright Chromium (fallback browser):
+   playwright install chromium
 
 ## Chrome Debug Setup (REQUIRED)
 
-The scraper attaches to a running Chrome instance. You must start Chrome in debug mode first.
+The scraper attaches to a running Chrome instance. You MUST start Chrome in debug mode before running the scraper.
 
-### 1. Close all regular Chrome windows
+1. Close all regular Chrome windows:
+   pkill -f chrome || true
+   sleep 2
 
-```bash
-pkill -f chrome || true
-sleep 2
-```
+2. Launch Chrome with debug port:
+   google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug-gmap &
 
-### 2. Launch Chrome with debug port
+3. In that Chrome window:
+   - Log in to a Google account
+   - Open exactly N tabs at https://www.google.com/maps (N = --workers, default 4)
+   - Wait until each map is fully visible (not blank, not a consent page)
+   - Leave the tabs open — the crawler reuses them
 
-```bash
-google-chrome \
-  --remote-debugging-port=9222 \
-  --user-data-dir=/tmp/chrome-debug-gmap &
-```
+4. Verify CDP is reachable:
+   curl -s http://localhost:9222/json/version
 
-### 3. In that Chrome window
+You should see JSON with "Browser": "Chrome/...".
 
-1. Log in to a Google account.
-2. Open exactly N tabs at `https://www.google.com/maps` (N = `--workers`, default 4).
-3. Wait until each map is fully visible (not a blank page, not a consent page).
-4. Leave the tabs open — the crawler reuses them.
+## Database Setup
 
-### 4. Verify CDP is reachable
+Place your cafes_cafe.db (SQLite) in the project root:
 
-```bash
-curl -s http://localhost:9222/json/version
-```
+Required table: cafes_cafe
+Required columns: id, slug, name, address, city, neighborhood, latitude, longitude, phone, approval_status
+Optional columns (improved matching): search_address, search_name, search_city
 
-You should see JSON with `"Browser": "Chrome/..."`.
-
----
+Verify schema:
+sqlite3 cafes_cafe.db "PRAGMA table_info(cafes_cafe);"
 
 ## Usage
 
-### Basic crawl (all approved cafes, 4 workers)
+### Single machine (all approved cafes)
 
-```bash
-python run.py --db cafes_cafe.db --workers 4
-```
+./.venv/bin/python run.py --db cafes_cafe.db --workers 4
 
-### Crawl with a limit
+### Limit to first N cafes
 
-```bash
-python run.py --db cafes_cafe.db --workers 4 --limit 50
-```
+./.venv/bin/python run.py --db cafes_cafe.db --workers 4 --limit 50
 
 ### Resume automatically (state is preserved)
 
-```bash
-python run.py --db cafes_cafe.db --workers 4
-# picks up where it left off based on crawler_state.json
-```
+./.venv/bin/python run.py --db cafes_cafe.db --workers 4
 
-### Retry only skipped cafes
+### Retry only previously skipped cafes
 
-```bash
-python run.py --db cafes_cafe.db --workers 4 \
+./.venv/bin/python run.py --db cafes_cafe.db --workers 4 \
   --retry-skipped \
   --skipped-input data/skipped_cafes.csv
-```
 
-### Custom CDP endpoint
+### Distributed across 15 machines
 
-```bash
-python run.py --db cafes_cafe.db --workers 4 \
-  --cdp-url http://localhost:9223
-```
+Each machine runs a different shard:
 
-### Distributed crawl across multiple machines
+Machine 0:
+./.venv/bin/python run.py --db cafes_cafe.db --workers 4 \
+  --shard-id 0 --num-shards 15 \
+  --output data/reviews_shard00.csv \
+  --state crawler_state_shard00.json \
+  --skipped data/skipped_shard00.csv
 
-Use `--shard-id` and `--num-shards` to split cafes evenly across multiple machines using deterministic MD5 hashing (no duplicates across shards):
+Machine 1:
+./.venv/bin/python run.py --db cafes_cafe.db --workers 4 \
+  --shard-id 1 --num-shards 15 \
+  --output data/reviews_shard01.csv \
+  --state crawler_state_shard01.json \
+  --skipped data/skipped_shard01.csv
 
-**Machine 0:**
-```bash
-python run.py --db cafes_cafe.db --workers 4 --shard-id 0 --num-shards 15 --output data/reviews_shard00.csv --state crawler_state_shard00.json --skipped data/skipped_shard00.csv
-```
+... and so on up to --shard-id 14.
 
-**Machine 1:**
-```bash
-python run.py --db cafes_cafe.db --workers 4 --shard-id 1 --num-shards 15 --output data/reviews_shard01.csv --state crawler_state_shard01.json --skipped data/skipped_shard01.csv
-```
-...
-
----
+Sharding is hash-based on cafe.slug (MD5), so each cafe always lands in the same shard — no duplicates across machines.
 
 ## CLI Reference
 
 | Flag | Default | Description |
 |---|---|---|
-| `--db` | `cafes_cafe.db` | SQLite database path (read-only) |
-| `--output` | `data/google_reviews.csv` | Output CSV path |
-| `--state` | `crawler_state.json` | Checkpoint state JSON |
-| `--skipped` | `data/skipped_cafes.csv` | Skip report CSV |
-| `--skipped-input` | `None` | Input CSV for `--retry-skipped` mode |
-| `--limit` | `None` | Max cafes this run |
-| `--workers` | `4` | Concurrent workers (must equal open Maps tabs) |
-| `--shard-id` | `0` | Shard index (0-based) for distributed crawling |
-| `--num-shards` | `1` | Total number of shards (1 = unshared) |
-| `--max-cafes-per-tab` | `10` | Rotate browser tab after N cafes |
-| `--cdp-url` | `http://localhost:9222` | Chrome debug endpoint |
-| `--headful` | `False` | Use headful browser if CDP fails |
-| `--retry-skipped` | `False` | Only retry cafes from `--skipped-input` |
-| `--log-level` | `INFO` | Logging verbosity (DEBUG/INFO/WARNING/ERROR) |
-
----
+| --db | cafes_cafe.db | SQLite database path (read-only) |
+| --output | data/google_reviews.csv | Output CSV path |
+| --state | crawler_state.json | Checkpoint state JSON |
+| --skipped | data/skipped_cafes.csv | Skip report CSV |
+| --skipped-input | None | Input CSV for --retry-skipped |
+| --limit | None | Max cafes this run |
+| --workers | 4 | Concurrent workers (must equal open Maps tabs) |
+| --shard-id | 0 | This shard's index (0-based) |
+| --num-shards | 1 | Total number of shards |
+| --cdp-url | http://localhost:9222 | Chrome debug endpoint |
+| --headful | False | Use headful browser if CDP fails |
+| --retry-skipped | False | Only retry cafes from --skipped-input |
+| --log-level | INFO | Logging verbosity |
 
 ## Output Schema
 
-### `data/google_reviews.csv`
+### data/google_reviews.csv
 
 | Column | Example |
 |---|---|
-| `cafe_slug` | `1e11ca0c-976e-4aad-a651-b9c68852f16a` |
-| `cafe_name` | `عمارت نیلی` |
-| `city` | `تهران` |
-| `author` | `Ali S. M` |
-| `rating` | `5 stars` |
-| `date` | `2 months ago` |
-| `text` | Full review body (newlines collapsed) |
+| cafe_slug | 1e11ca0c-976e-4aad-a651-b9c68852f16a |
+| cafe_name | عمارت نیلی |
+| city | تهران |
+| author | Ali S. M |
+| rating | 5 stars |
+| date | 2 months ago |
+| text | Full review body (newlines collapsed) |
 
-### `data/skipped_cafes.csv`
+### data/skipped_cafes.csv
 
 | Column | Example |
 |---|---|
-| `cafe_id` | `188` |
-| `cafe_slug` | `1e11ca0c-...` |
-| `cafe_name` | `عمارت نیلی` |
-| `reason` | `place_name_mismatch` |
+| cafe_id | 188 |
+| cafe_slug | 1e11ca0c-... |
+| cafe_name | عمارت نیلی |
+| reason | place_name_mismatch |
 
-**Skip reasons:** `no_page_signal`, `no_result_matched_within_threshold`, `place_coords_mismatch`, `place_name_mismatch`, `reviews_tab_could_not_be_clicked`, `review_cards_never_appeared`, `navigation_to_result_url_failed`, `exception`, `zero_reviews`.
+Skip reasons: no_page_signal, no_result_matched_within_threshold, place_coords_mismatch, place_name_mismatch, reviews_tab_could_not_be_clicked, review_cards_never_appeared, navigation_to_result_url_failed, exception, zero_reviews.
 
-### `crawler_state.json`
+### crawler_state.json
 
-```json
 {"processed_slugs": ["slug1", "slug2", ...]}
-```
 
----
+## Batch Running (recommended for large crawls)
 
-## Project Structure
+Run each shard in 100-cafe chunks with 5-minute pauses between chunks to avoid rate limiting. Example script (run_shard.sh):
 
-```
-gmap-antigravity/
-├── AGENTS.md                    # Antigravity project rules
-├── .agents/
-│   ├── rules/                   # Conditional rules (glob-based)
-│   └── skills/                  # Multi-step workflows
-├── README.md
-├── requirements.txt
-├── pytest.ini
-├── .gitignore
-├── src/
-│   ├── __init__.py
-│   ├── db_loader.py             # SQLite loader -> CafeRecord
-│   ├── resolver.py              # builds Google Maps URLs + coords validation
-│   ├── exporter.py              # CSV streaming exporter
-│   ├── state.py                 # checkpointing
-│   ├── skip_reporter.py         # skip CSV
-│   └── scraper.py               # Playwright-based scraper
-├── run.py                       # CLI orchestrator
-└── tests/
-    ├── test_db_loader.py
-    ├── test_resolver.py
-    ├── test_exporter.py
-    ├── test_state.py
-    ├── test_skip_reporter.py
-    ├── test_scraper.py
-    └── test_run.py
-```
+#!/usr/bin/env bash
+SHARD_ID="${1:?Usage: ./run_shard.sh <shard_id> <num_shards>}"
+NUM_SHARDS="${2:?Usage: ./run_shard.sh <shard_id> <num_shards>}"
+for chunk in $(seq 1 5); do
+    ./.venv/bin/python run.py --db cafes_cafe.db --workers 4 \
+        --shard-id "$SHARD_ID" --num-shards "$NUM_SHARDS" \
+        --output "data/reviews_shard$(printf '%02d' $SHARD_ID).csv" \
+        --state "crawler_state_shard$(printf '%02d' $SHARD_ID).json" \
+        --skipped "data/skipped_shard$(printf '%02d' $SHARD_ID).csv" \
+        --limit 100 --log-level INFO
+    [ "$chunk" -lt 5 ] && sleep 300
+done
 
----
+Usage:
+chmod +x run_shard.sh
+./run_shard.sh 0 15
 
-## Testing
+## Merging Shard Outputs
 
-Run the full unit test suite (no browser or network required):
+After all 15 shards finish:
 
-```bash
-./.venv/bin/pytest tests/ -v
-```
+python3 -c "
+import csv, glob
+shards = sorted(glob.glob('data/reviews_shard[0-9][0-9].csv'))
+all_rows = []
+columns = None
+for shard in shards:
+    with open(shard, encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        if columns is None:
+            columns = reader.fieldnames
+        rows = list(reader)
+        all_rows.extend(rows)
+    print(f'{shard}: {len(rows)} reviews')
+seen = set()
+unique = []
+for row in all_rows:
+    key = (row['cafe_slug'], row['author'], row['date'], row['text'])
+    if key not in seen:
+        seen.add(key)
+        unique.append(row)
+with open('data/google_reviews.csv', 'w', encoding='utf-8-sig', newline='') as f:
+    writer = csv.DictWriter(f, fieldnames=columns)
+    writer.writeheader()
+    writer.writerows(unique)
+print(f'Merged: {len(unique)} unique reviews')
+"
 
-Run the integration test (requires Chrome debug on port 9222):
+## Architecture
 
-```bash
-./.venv/bin/pytest -m integration tests/
-```
+Pipeline flow:
+DatabaseLoader -> LocationResolver -> ScraperWorker (xN via tab pool) -> CSVExporter
 
-**Coverage:** 81 unit tests passing, 1 integration test (skipped by default).
+Validation gates (any -> accept):
+1. Clicked-result coordinates (href !3d/!4d) — 800m loose threshold
+2. Page-URL coordinates (/@lat,lng) — 500m strict threshold
+3. Name fallback — Persian/Latin transliteration + n-gram matching
 
----
-
-## Architecture Notes
-
-### Pipeline flow
-
-```
-DatabaseLoader
-      ↓ (CafeRecord)
-LocationResolver
-      ↓ (ResolvedTarget with URL + fallbacks)
-ScraperWorker (×N)  ←── claims Page from tab pool
-      ↓ (List[ReviewRecord])
-CSVExporter
-      ↓
-data/google_reviews.csv
-```
-
-### Validation strategy
-
-Three independent gates. If any passes, the place is accepted:
-
-1. **Clicked-result coordinates** — the `href` of a search result carries exact place coords in `!3d...!4d...`. Compared with DB coords using haversine. Threshold: **800 m**.
-2. **Page-URL coordinates** — after navigation, `window.location.href` contains `/@lat,lng`. Threshold: **500 m** (stricter because the URL is authoritative).
-3. **Name fallback** — if no coordinates available, compare normalized names with Persian↔Latin transliteration + n-gram matching.
-
-If none pass, the cafe is skipped and logged with a reason code.
-
-### Checkpointing
-
-Only cafes with **≥ 1 extracted review** are added to `crawler_state.json`. This means:
-
-- Interrupting with `Ctrl+C` never loses progress.
-- Failed cafes are retried on the next run by default.
-- To avoid re-attempting failed cafes every run, use `--retry-skipped` with an explicit `--skipped-input`.
-
-### Rate limit awareness
-
-Google aggressively rate-limits Maps scraping. Signs:
-
-- Many `page.goto` timeouts in a row
-- Tabs redirect to `https://www.google.com/sorry/...`
-- Success rate drops below 30 %
-
-**Recovery:**
-
-1. `Ctrl+C` to stop (state is preserved).
-2. Wait 30–60 minutes.
-3. Close affected tabs, open 4 fresh Maps tabs.
-4. Resume with the same command.
-
-For large runs, split the database into shards and run on multiple IPs (each machine gets its own rate-limit quota).
-
----
+Checkpointing: only cafes with >=1 review are marked processed. Failed cafes retry on next run.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `CDP endpoint unreachable` | Chrome debug not running | Start Chrome with `--remote-debugging-port=9222` |
-| Tabs load blank | Forgot to open Maps tabs first | Open N tabs, restart crawl |
-| Rate limit (timeouts) | Google throttling | `Ctrl+C`, wait 30–60 min, resume |
-| `No result matched` | Bad address or place missing from Maps | Check `data/skipped_cafes.csv` |
-| `Page pool empty` warning | Fewer tabs than `--workers` | Open more tabs or lower `--workers` |
-| Extremely slow per cafe (> 30 s) | `wait_until="domcontentloaded"` hangs on SPA | Ensure `wait_until="commit"` in `_scrape_with_page` |
-| `google.com/sorry` in tab URL | Captcha triggered | Solve manually in Chrome, wait 15 min |
-
----
-
-## Development Conventions
-
-- **AGENTS.md** + `.agents/rules/` — Antigravity guidelines (Python style, testing conventions)
-- **Conventional Commits** — `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `test:`
-- **Line length** ≤ 88 (Black-compatible)
-- **Type hints** required for all public functions
-- **Tests** required for every new module (mark integration tests with `@pytest.mark.integration`)
-
----
+| CDP endpoint unreachable | Chrome debug not running | Start Chrome with --remote-debugging-port=9222 |
+| Tabs load blank | Missing Maps tabs | Open N tabs, restart crawl |
+| Rate limit (timeouts) | Google throttling | Ctrl+C, wait 30-60 min, resume |
+| Chrome page crashed | Tab OOM after many cafes | Tabs auto-rotate every 10 cafes |
+| No result matched | Bad address or missing place | Check data/skipped_cafes.csv |
+| Page pool empty | Fewer tabs than --workers | Open more tabs or lower --workers |
 
 ## License
 

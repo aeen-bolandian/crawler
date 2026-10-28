@@ -4,30 +4,61 @@ __pycache__/
 *$py.class
 *.so
 .Python
-env/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
 venv/
 .venv/
+env/
 ENV/
 
-# Testing & Coverage
+# Testing
 .pytest_cache/
 .coverage
 htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
 
-# Google Maps Scraper Data & State
-data/
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# SECURITY: Databases (NEVER commit)
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
-crawler_state*.json
-*.csv
+*.sqlite
+*.sqlite3
+data/*.db
+data/*.sqlite*
 
-# Logs & Environment
+# SECURITY: Crawler state & output
+crawler_state*.json
+*.state.json
+data/reviews_shard*.csv
+data/skipped_shard*.csv
+data/google_reviews*.csv
+data/*.csv
+!data/samples/*.csv
+
+# SECURITY: Logs
+logs/
 *.log
+
+# SECURITY: Environment & secrets
 .env
 .env.*
+*.pem
+*.key
+secrets.json
 
-# IDE / Editor
-.vscode/
-.idea/
+# OS
+.DS_Store
+Thumbs.db
