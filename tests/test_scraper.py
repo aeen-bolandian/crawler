@@ -141,10 +141,12 @@ async def test_worker_scrape_no_place_match(
         loc = MagicMock()
         if sel == "h1":
             loc.first = h1_loc
+            loc.count = AsyncMock(return_value=1)
         elif "maps/place" in sel:
             return links_loc
         else:
             loc.first = AsyncMock(is_visible=AsyncMock(return_value=False))
+            loc.count = AsyncMock(return_value=0)
         return loc
 
     mock_page.locator = MagicMock(side_effect=mock_locator)
@@ -189,10 +191,12 @@ async def test_worker_handles_results_h1_as_search_results_page(
         loc = MagicMock()
         if sel == "h1":
             loc.first = h1_loc
+            loc.count = AsyncMock(return_value=1)
         elif "maps/place" in sel:
             return links_loc
         else:
             loc.first = AsyncMock(is_visible=AsyncMock(return_value=False))
+            loc.count = AsyncMock(return_value=0)
         return loc
 
     mock_page.locator = MagicMock(side_effect=mock_locator)
@@ -278,18 +282,23 @@ async def test_worker_scrape_success(sample_target: ResolvedTarget) -> None:
         loc = MagicMock()
         if sel == "h1":
             loc.first = h1_loc
+            loc.count = AsyncMock(return_value=1)
         elif "button[role='tab']" in sel:
             loc.first = reviews_tab
+            loc.count = AsyncMock(return_value=1)
         elif "jftiEf" in sel:
             return cards_loc
         elif "m6QErb" in sel or "feed" in sel:
             loc.first = feed_loc
+            loc.count = AsyncMock(return_value=1)
         elif "button.w8nwRe" in sel:
             loc.all = AsyncMock(return_value=[])
+            loc.count = AsyncMock(return_value=0)
         elif "maps/place" in sel:
             loc.count = AsyncMock(return_value=0)
         else:
             loc.first = AsyncMock(is_visible=AsyncMock(return_value=False))
+            loc.count = AsyncMock(return_value=0)
         return loc
 
     mock_page.locator = MagicMock(side_effect=page_locator)
@@ -469,6 +478,87 @@ async def test_worker_recovers_from_crash(
     await worker.scrape(sample_target)
     assert worker._rotate_tab.called
     assert worker._needs_new_page is False
+
+
+@pytest.mark.asyncio
+async def test_worker_page_signal_timeout(
+    sample_target: ResolvedTarget,
+) -> None:
+    """Verify worker sets PAGE_SIGNAL_NONE when signal doesn't appear."""
+    pool: asyncio.Queue = asyncio.Queue()
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.url = "https://www.google.com/maps/search/test"
+    mock_page.goto = AsyncMock()
+    mock_page.wait_for_timeout = AsyncMock()
+
+    loc_zero = MagicMock()
+    loc_zero.count = AsyncMock(return_value=0)
+    loc_zero.first = AsyncMock(is_visible=AsyncMock(return_value=False))
+    mock_page.locator = MagicMock(return_value=loc_zero)
+    await pool.put(mock_page)
+
+    mock_context = MagicMock()
+    cfg = ScraperConfig(PAGE_SIGNAL_TIMEOUT_S=0.05, POST_GOTO_SETTLE_MS=0)
+    worker = ScraperWorker(
+        context=mock_context,
+        worker_id=1,
+        page_pool=pool,
+        config=cfg,
+    )
+
+    reviews = await worker.scrape(sample_target)
+    assert reviews == []
+    assert worker.last_skip_reason == SkipReason.PAGE_SIGNAL_NONE
+
+
+@pytest.mark.asyncio
+async def test_worker_page_signal_detected(
+    sample_target: ResolvedTarget,
+) -> None:
+    """Verify worker proceeds when signal appears after initial delay."""
+    pool: asyncio.Queue = asyncio.Queue()
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.url = "https://www.google.com/maps/@35.7592,51.4089,17z"
+    mock_page.goto = AsyncMock()
+    mock_page.wait_for_timeout = AsyncMock()
+
+    counts = [0, 1]
+
+    async def mock_count() -> int:
+        return counts.pop(0) if counts else 1
+
+    h1_loc = AsyncMock()
+    h1_loc.is_visible = AsyncMock(return_value=True)
+    h1_loc.inner_text = AsyncMock(return_value="عمارت نیلی")
+
+    def page_locator(sel: str) -> MagicMock:
+        loc = MagicMock()
+        if sel == "h1":
+            loc.first = h1_loc
+            loc.count = AsyncMock(side_effect=mock_count)
+        else:
+            loc.first = AsyncMock(is_visible=AsyncMock(return_value=False))
+            loc.count = AsyncMock(return_value=0)
+        return loc
+
+    mock_page.locator = MagicMock(side_effect=page_locator)
+    await pool.put(mock_page)
+
+    mock_context = MagicMock()
+    cfg = ScraperConfig(PAGE_SIGNAL_TIMEOUT_S=1.0, POST_GOTO_SETTLE_MS=0)
+    worker = ScraperWorker(
+        context=mock_context,
+        worker_id=1,
+        page_pool=pool,
+        config=cfg,
+    )
+    worker._click_reviews_tab = AsyncMock(return_value=False)
+
+    reviews = await worker.scrape(sample_target)
+    assert reviews == []
+    assert worker.last_skip_reason == SkipReason.REVIEWS_TAB_FAILED
 
 
 # 5. Integration test (skipped by default)

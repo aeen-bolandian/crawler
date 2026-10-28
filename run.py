@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from pathlib import Path
+import random
 import sys
 from typing import Optional
 
@@ -190,7 +191,7 @@ class CrawlerPipeline:
             worker: Assigned ScraperWorker.
             cafe: CafeRecord to process.
         """
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(random.uniform(0.3, 1.0))
         target = self.resolver.resolve(cafe)
         reviews = await worker.scrape(target)
 

@@ -69,6 +69,7 @@ class ScraperConfig:
 
     # Timeouts in milliseconds
     PAGE_LOAD_TIMEOUT_MS: int = 15_000
+    PAGE_SIGNAL_TIMEOUT_S: float = 10.0
     POST_GOTO_SETTLE_MS: int = 3_000
     POST_TAB_CLICK_SETTLE_MS: int = 2_000
     POST_MORE_EXPAND_SETTLE_MS: int = 300
@@ -337,7 +338,7 @@ class ScraperWorker:
             try:
                 await page.wait_for_selector(
                     self.config.SEL_REVIEW_ITEM_FALLBACK,
-                    timeout=3_000,
+                    timeout=15_000,
                     state="attached",
                 )
                 count = await page.locator(
@@ -356,6 +357,35 @@ class ScraperWorker:
                     f"{self.config.REVIEW_CARDS_WAIT_MS}ms"
                 )
                 return False
+
+    async def _log_no_signal_diagnostics(
+        self, page: Page, cafe_id: int | str, message: str
+    ) -> None:
+        """Log diagnostic details when no page signal is found."""
+        try:
+            h1_c = await page.locator(self.config.SEL_PLACE_H1).count()
+        except Exception:
+            h1_c = -1
+        try:
+            link_c = await page.locator(self.config.SEL_RESULT_LINK).count()
+        except Exception:
+            link_c = -1
+        try:
+            main_c = await page.locator("[role='main']").count()
+        except Exception:
+            main_c = -1
+        try:
+            results_div_c = await page.locator(
+                "div[aria-label*='Results' i], div[aria-label*='نتایج' i]"
+            ).count()
+        except Exception:
+            results_div_c = -1
+
+        logger.warning(
+            f"[w{self.worker_id}][{cafe_id}] {message} | "
+            f"url='{page.url}' | h1_count={h1_c} | result_links={link_c} | "
+            f"role_main={main_c} | results_div={results_div_c}"
+        )
 
     async def scrape(self, target: ResolvedTarget) -> list[ReviewRecord]:
         """Scrape reviews for a resolved cafe target.
@@ -455,8 +485,8 @@ class ScraperWorker:
             return []
 
         if "google.com/sorry" in page.url:
-            logger.warning(
-                f"Worker {self.worker_id}: rate limited on google.com/sorry"
+            await self._log_no_signal_diagnostics(
+                page, target.cafe.id, "rate limited on google.com/sorry"
             )
             self._last_skip_reason = SkipReason.PAGE_SIGNAL_NONE
             return []
@@ -464,6 +494,36 @@ class ScraperWorker:
         await self._dismiss_consent(page)
         logger.debug(
             f"[w{self.worker_id}][{target.cafe.id}] consent dismissed"
+        )
+        logger.debug(
+            f"[w{self.worker_id}][{target.cafe.id}] waiting for page signal"
+        )
+        wait_timeout = getattr(self.config, "PAGE_SIGNAL_TIMEOUT_S", 10.0)
+        wait_deadline = asyncio.get_event_loop().time() + wait_timeout
+        signal_found = False
+        while asyncio.get_event_loop().time() < wait_deadline:
+            try:
+                h1_count = await page.locator(self.config.SEL_PLACE_H1).count()
+                link_count = await page.locator(
+                    self.config.SEL_RESULT_LINK
+                ).count()
+                if h1_count > 0 or link_count > 0:
+                    signal_found = True
+                    break
+            except Exception as err:
+                if _is_crash_error(err):
+                    raise
+            await page.wait_for_timeout(500)
+
+        if not signal_found:
+            await self._log_no_signal_diagnostics(
+                page, target.cafe.id, "no signal after 10s wait"
+            )
+            self._last_skip_reason = SkipReason.PAGE_SIGNAL_NONE
+            return []
+
+        logger.debug(
+            f"[w{self.worker_id}][{target.cafe.id}] page signal detected"
         )
         await page.wait_for_timeout(self.config.POST_GOTO_SETTLE_MS)
         logger.debug(
@@ -501,6 +561,9 @@ class ScraperWorker:
         )
 
         if not is_place and link_count == 0:
+            await self._log_no_signal_diagnostics(
+                page, target.cafe.id, "no page signal (neither place nor links)"
+            )
             self._last_skip_reason = SkipReason.PAGE_SIGNAL_NONE
             return []
 
@@ -579,9 +642,10 @@ class ScraperWorker:
                 ).first.inner_text(timeout=2000)
                 h1_text = val.strip() if isinstance(val, str) else ""
                 if h1_text.lower() in ("results", "نتایج"):
-                    logger.warning(
-                        f"Place check remained on search results ('{h1_text}') "
-                        f"for {target.cafe.slug}"
+                    await self._log_no_signal_diagnostics(
+                        page,
+                        target.cafe.id,
+                        f"place check remained on search results ('{h1_text}')",
                     )
                     self._last_skip_reason = SkipReason.PAGE_SIGNAL_NONE
                     return []
@@ -617,7 +681,7 @@ class ScraperWorker:
         # Wait for review cards to appear
         try:
             cards_ready = await asyncio.wait_for(
-                self._wait_for_review_cards(page, target), timeout=25.0
+                self._wait_for_review_cards(page, target), timeout=40.0
             )
         except asyncio.TimeoutError:
             logger.warning(
