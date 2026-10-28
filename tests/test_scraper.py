@@ -561,6 +561,98 @@ async def test_worker_page_signal_detected(
     assert worker.last_skip_reason == SkipReason.REVIEWS_TAB_FAILED
 
 
+@pytest.mark.asyncio
+async def test_worker_goto_retries_and_triggers_rate_limit(
+    sample_target: ResolvedTarget,
+) -> None:
+    """Verify goto retries 3 times on timeout, sets PAGE_NAV_FAILED, and pauses."""
+    pool: asyncio.Queue = asyncio.Queue()
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.goto = AsyncMock(
+        side_effect=Exception("Page.goto: Timeout 20000ms exceeded")
+    )
+    mock_page.wait_for_timeout = AsyncMock()
+    await pool.put(mock_page)
+
+    rate_limit_pause = asyncio.Event()
+    mock_context = MagicMock()
+    worker = ScraperWorker(
+        context=mock_context,
+        worker_id=1,
+        page_pool=pool,
+        rate_limit_pause=rate_limit_pause,
+    )
+
+    reviews = await worker.scrape(sample_target)
+    assert reviews == []
+    assert worker.last_skip_reason == SkipReason.PAGE_NAV_FAILED
+    assert mock_page.goto.call_count == 3
+    assert rate_limit_pause.is_set()
+
+
+@pytest.mark.asyncio
+async def test_worker_sorry_page_triggers_rate_limit(
+    sample_target: ResolvedTarget,
+) -> None:
+    """Verify encountering google.com/sorry triggers rate_limit_pause."""
+    pool: asyncio.Queue = asyncio.Queue()
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.url = "https://www.google.com/sorry/index?continue=..."
+    mock_page.goto = AsyncMock()
+    mock_page.wait_for_timeout = AsyncMock()
+    loc = MagicMock()
+    loc.count = AsyncMock(return_value=0)
+    mock_page.locator = MagicMock(return_value=loc)
+    await pool.put(mock_page)
+
+    rate_limit_pause = asyncio.Event()
+    mock_context = MagicMock()
+    worker = ScraperWorker(
+        context=mock_context,
+        worker_id=2,
+        page_pool=pool,
+        rate_limit_pause=rate_limit_pause,
+    )
+
+    reviews = await worker.scrape(sample_target)
+    assert reviews == []
+    assert worker.last_skip_reason == SkipReason.PAGE_SIGNAL_NONE
+    assert rate_limit_pause.is_set()
+
+
+@pytest.mark.asyncio
+async def test_worker_pauses_when_rate_limit_set(
+    sample_target: ResolvedTarget,
+) -> None:
+    """Verify worker waits when rate_limit_pause is active and clears it."""
+    pool: asyncio.Queue = asyncio.Queue()
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.url = "https://www.google.com/maps/@35.7592,51.4089,17z"
+    mock_page.goto = AsyncMock()
+    mock_page.wait_for_timeout = AsyncMock()
+    await pool.put(mock_page)
+
+    rate_limit_pause = asyncio.Event()
+    rate_limit_pause.set()
+
+    mock_context = MagicMock()
+    cfg = ScraperConfig(RATE_LIMIT_PAUSE_SECONDS=0.01)
+    worker = ScraperWorker(
+        context=mock_context,
+        worker_id=3,
+        page_pool=pool,
+        config=cfg,
+        rate_limit_pause=rate_limit_pause,
+    )
+    worker._scrape_with_page = AsyncMock(return_value=[])
+
+    await worker.scrape(sample_target)
+    assert not rate_limit_pause.is_set()
+
+
 # 5. Integration test (skipped by default)
 @pytest.mark.integration
 @pytest.mark.asyncio

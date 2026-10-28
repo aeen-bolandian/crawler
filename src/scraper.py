@@ -68,8 +68,9 @@ class ScraperConfig:
     SEL_RESULT_LINK: str = "a[href*='/maps/place/']"
 
     # Timeouts in milliseconds
-    PAGE_LOAD_TIMEOUT_MS: int = 15_000
+    PAGE_LOAD_TIMEOUT_MS: int = 20_000
     PAGE_SIGNAL_TIMEOUT_S: float = 10.0
+    RATE_LIMIT_PAUSE_SECONDS: float = 60.0
     POST_GOTO_SETTLE_MS: int = 3_000
     POST_TAB_CLICK_SETTLE_MS: int = 2_000
     POST_MORE_EXPAND_SETTLE_MS: int = 300
@@ -134,6 +135,7 @@ class ScraperWorker:
         max_reviews: int = 150,
         config: Optional[ScraperConfig] = None,
         max_cafes_per_tab: Optional[int] = None,
+        rate_limit_pause: Optional[asyncio.Event] = None,
     ) -> None:
         """Initialize the scraper worker.
 
@@ -144,6 +146,7 @@ class ScraperWorker:
             max_reviews: Maximum review records to extract per venue.
             config: Scraper configuration parameters and selectors.
             max_cafes_per_tab: Maximum cafes to process before rotating tab.
+            rate_limit_pause: Shared Event to pause workers during rate limiting.
         """
         self.context = context
         self.worker_id = worker_id
@@ -155,6 +158,7 @@ class ScraperWorker:
             if max_cafes_per_tab is not None
             else self.config.MAX_CAFES_PER_TAB
         )
+        self.rate_limit_pause = rate_limit_pause
         self.cafes_processed_on_this_tab: int = 0
         self._needs_new_page: bool = False
         self._page: Optional[Page] = None
@@ -387,6 +391,19 @@ class ScraperWorker:
             f"role_main={main_c} | results_div={results_div_c}"
         )
 
+    def _trigger_rate_limit(self, cafe_slug: str) -> None:
+        """Trigger shared rate limit pause event and log warning.
+
+        Args:
+            cafe_slug: Slug of the cafe encountering rate-limiting.
+        """
+        logger.warning(
+            f"[rate-limit] detected by worker {self.worker_id} on cafe "
+            f"{cafe_slug} — pausing all workers for 60s"
+        )
+        if self.rate_limit_pause is not None:
+            self.rate_limit_pause.set()
+
     async def scrape(self, target: ResolvedTarget) -> list[ReviewRecord]:
         """Scrape reviews for a resolved cafe target.
 
@@ -397,6 +414,17 @@ class ScraperWorker:
             List of extracted ReviewRecord items. Empty list if skipped or failed.
         """
         self._last_skip_reason = None
+
+        if self.rate_limit_pause is not None and self.rate_limit_pause.is_set():
+            pause_duration = getattr(
+                self.config, "RATE_LIMIT_PAUSE_SECONDS", 60.0
+            )
+            logger.info(
+                f"[w{self.worker_id}] rate_limit_pause is set, "
+                f"pausing for {pause_duration}s"
+            )
+            await asyncio.sleep(pause_duration)
+            self.rate_limit_pause.clear()
 
         if self._needs_new_page:
             try:
@@ -463,28 +491,44 @@ class ScraperWorker:
         self, page: Page, target: ResolvedTarget
     ) -> list[ReviewRecord]:
         """Core scraping routine after obtaining page."""
-        try:
-            logger.debug(
-                f"[w{self.worker_id}][{target.cafe.id}] goto START: {target.url}"
-            )
-            await page.goto(
-                target.url,
-                timeout=self.config.PAGE_LOAD_TIMEOUT_MS,
-                wait_until="commit",
-            )
-            logger.debug(
-                f"[w{self.worker_id}][{target.cafe.id}] goto DONE: {page.url}"
-            )
-        except Exception as err:
-            if _is_crash_error(err):
-                raise
-            logger.warning(
-                f"Worker {self.worker_id}: nav failed for {target.url}: {err}"
-            )
+        max_attempts: int = 3
+        goto_success: bool = False
+        consecutive_timeouts: int = 0
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.debug(
+                    f"[w{self.worker_id}][{target.cafe.id}] "
+                    f"goto START (attempt {attempt}/{max_attempts}): {target.url}"
+                )
+                await page.goto(
+                    target.url,
+                    timeout=self.config.PAGE_LOAD_TIMEOUT_MS,
+                    wait_until="commit",
+                )
+                logger.debug(
+                    f"[w{self.worker_id}][{target.cafe.id}] goto DONE: {page.url}"
+                )
+                goto_success = True
+                break
+            except Exception as err:
+                if _is_crash_error(err):
+                    raise
+                consecutive_timeouts += 1
+                logger.warning(
+                    f"Worker {self.worker_id}: nav attempt {attempt}/{max_attempts} "
+                    f"failed for {target.url}: {err}"
+                )
+                if attempt < max_attempts:
+                    await page.wait_for_timeout(3_000)
+
+        if not goto_success:
+            if consecutive_timeouts >= max_attempts:
+                self._trigger_rate_limit(target.cafe.slug)
             self._last_skip_reason = SkipReason.PAGE_NAV_FAILED
             return []
 
         if "google.com/sorry" in page.url:
+            self._trigger_rate_limit(target.cafe.slug)
             await self._log_no_signal_diagnostics(
                 page, target.cafe.id, "rate limited on google.com/sorry"
             )

@@ -193,6 +193,7 @@ class CrawlerPipeline:
         max_cafes_per_tab: int = 10,
         shard_id: int = 0,
         num_shards: int = 1,
+        rate_limit_pause: Optional[asyncio.Event] = None,
     ) -> None:
         """Initialize the crawler pipeline with dependencies.
 
@@ -209,6 +210,7 @@ class CrawlerPipeline:
             max_cafes_per_tab: Max cafes to process before rotating tab.
             shard_id: Shard index (0-based) for distributed crawling.
             num_shards: Total number of shards (1 = disabled).
+            rate_limit_pause: Shared Event to pause workers during rate limiting.
         """
         self.loader = loader
         self.scraper = scraper
@@ -222,6 +224,11 @@ class CrawlerPipeline:
         self.max_cafes_per_tab = max(1, max_cafes_per_tab)
         self.shard_id = shard_id
         self.num_shards = num_shards
+        self.rate_limit_pause = (
+            rate_limit_pause
+            if rate_limit_pause is not None
+            else asyncio.Event()
+        )
 
     async def _process_one(
         self, worker: ScraperWorker, cafe: CafeRecord
@@ -232,7 +239,7 @@ class CrawlerPipeline:
             worker: Assigned ScraperWorker.
             cafe: CafeRecord to process.
         """
-        await asyncio.sleep(random.uniform(0.3, 1.0))
+        await asyncio.sleep(random.uniform(1.0, 3.0))
         target = self.resolver.resolve(cafe)
         reviews = await worker.scrape(target)
 
@@ -305,6 +312,7 @@ class CrawlerPipeline:
                 worker_id=worker_id,
                 page_pool=self.scraper.page_pool,
                 max_cafes_per_tab=self.max_cafes_per_tab,
+                rate_limit_pause=self.rate_limit_pause,
             )
             try:
                 while True:
