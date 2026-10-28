@@ -14,6 +14,7 @@ from src.scraper import (
     ScraperConfig,
     ScraperWorker,
     SkipReason,
+    _is_network_error,
     _normalize_name,
     _transliterate_word,
     names_look_same,
@@ -816,6 +817,51 @@ async def test_validate_accepts_coords_and_name(sample_cafe: CafeRecord) -> None
 
     matched = await worker._validate_place_match(mock_page, sample_cafe)
     assert matched is True
+
+
+def test_is_network_error_helper() -> None:
+    """Verify _is_network_error detects network, VPN, and SSL handshake errors."""
+    assert _is_network_error(Exception("handshake failed"))
+    assert _is_network_error(Exception("net_error -100"))
+    assert _is_network_error(Exception("net_error -2"))
+    assert _is_network_error(Exception("connection reset by peer"))
+    assert not _is_network_error(Exception("Timeout 20000ms exceeded"))
+    assert not _is_network_error(ValueError("Invalid argument"))
+
+
+@pytest.mark.asyncio
+async def test_worker_ssl_handshake_skips_immediately(
+    sample_target: ResolvedTarget,
+) -> None:
+    """Verify SSL handshake error aborts immediately without retrying 3 times."""
+    pool: asyncio.Queue = asyncio.Queue()
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.goto = AsyncMock(
+        side_effect=Exception(
+            "net/socket/ssl_client_socket_impl.cc:949 handshake failed; "
+            "net_error -100"
+        )
+    )
+    mock_page.wait_for_timeout = AsyncMock()
+    await pool.put(mock_page)
+
+    rate_limit_pause = asyncio.Event()
+    mock_context = MagicMock()
+    worker = ScraperWorker(
+        context=mock_context,
+        worker_id=1,
+        page_pool=pool,
+        rate_limit_pause=rate_limit_pause,
+    )
+
+    reviews = await worker.scrape(sample_target)
+    assert reviews == []
+    assert worker.last_skip_reason == SkipReason.PAGE_NAV_FAILED
+    # Crucial: Must NOT retry 3 times for SSL handshake failure
+    assert mock_page.goto.call_count == 1
+    # Must NOT trigger rate limit pause
+    assert not rate_limit_pause.is_set()
 
 
 # 5. Integration test (skipped by default)

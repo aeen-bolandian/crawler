@@ -15,6 +15,7 @@ from pathlib import Path
 import random
 import sys
 from typing import Optional
+import urllib.request
 
 from tqdm import tqdm
 
@@ -359,6 +360,40 @@ class CrawlerPipeline:
             )
 
 
+def _check_network() -> bool:
+    """Verify Google Maps is reachable before starting."""
+    try:
+        req = urllib.request.Request(
+            "https://www.google.com/maps",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status in (200, 301, 302)
+    except Exception as exc:
+        logger.error(f"Network check failed: {exc}")
+        return False
+
+
+def _emergency_state_flush(
+    state_path: Path, processed_slugs: set[str]
+) -> None:
+    """Self-contained emergency state flush executed on interpreter shutdown.
+
+    Uses dynamic imports and Path.write_text() to avoid relying on
+    interpreter-managed builtins during teardown.
+    """
+    try:
+        _json = __import__("json")
+        _os = __import__("os")
+        tmp = state_path.with_name(f"{state_path.name}.emergency.tmp")
+        payload = {"processed_slugs": sorted(processed_slugs)}
+        content = _json.dumps(payload, indent=2, ensure_ascii=False)
+        tmp.write_text(content, encoding="utf-8")
+        _os.replace(tmp, state_path)
+    except Exception:
+        pass
+
+
 async def _main_async(args: argparse.Namespace) -> int:
     """Run the asynchronous scraper CLI orchestration pipeline.
 
@@ -373,6 +408,15 @@ async def _main_async(args: argparse.Namespace) -> int:
         return 1
 
     _configure_logging(args.log_level)
+
+    if not _check_network():
+        logger.error(
+            "❌ Cannot reach Google Maps. Check your VPN/internet.\n"
+            "   Run: curl -s https://www.google.com/maps -o /dev/null "
+            "-w '%{http_code}'\n"
+            "   Expected: 200 or 301"
+        )
+        raise SystemExit(1)
 
     retry_slugs: Optional[set[str]] = None
     if args.retry_skipped:
@@ -390,19 +434,9 @@ async def _main_async(args: argparse.Namespace) -> int:
     exporter = CSVExporter(args.output)
     resolver = LocationResolver()
 
-    def _emergency_flush() -> None:
-        try:
-            import json
-            import os
-
-            tmp = state.state_path.with_suffix(".tmp")
-            payload = {"processed_slugs": sorted(state.processed)}
-            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            os.replace(tmp, state.state_path)
-        except Exception:
-            pass
-
-    atexit.register(_emergency_flush)
+    atexit.register(
+        _emergency_state_flush, state.state_path, state.processed
+    )
 
     try:
         with DatabaseLoader(args.db) as loader:

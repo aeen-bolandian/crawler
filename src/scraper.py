@@ -125,6 +125,17 @@ def _is_crash_error(err: BaseException) -> bool:
     )
 
 
+def _is_network_error(err: Exception) -> bool:
+    """Return True if the error is a network/VPN/SSL failure."""
+    msg = str(err).lower()
+    return (
+        "handshake failed" in msg
+        or "net_error -100" in msg
+        or "net_error -2" in msg
+        or "connection reset" in msg
+    )
+
+
 class ScraperWorker:
     """Scrapes Google Maps reviews using an assigned or claimed browser tab."""
 
@@ -235,9 +246,16 @@ class ScraperWorker:
             )
             await new_page.wait_for_timeout(3_000)
         except Exception as err:
-            logger.warning(
-                f"[w{self.worker_id}] error navigating new tab: {err}"
-            )
+            if _is_crash_error(err):
+                raise
+            if _is_network_error(err):
+                logger.warning(
+                    f"[w{self.worker_id}] [network] SSL handshake failed — check VPN"
+                )
+            else:
+                logger.warning(
+                    f"[w{self.worker_id}] error navigating new tab: {err}"
+                )
 
         self.cafes_processed_on_this_tab = 0
         self._needs_new_page = False
@@ -451,9 +469,18 @@ class ScraperWorker:
             )
             await page.wait_for_timeout(self.config.POST_GOTO_SETTLE_MS)
         except Exception as err:
-            logger.debug(
-                f"[w{self.worker_id}][{cafe.id}] bare retry nav failed: {err}"
-            )
+            if _is_crash_error(err):
+                raise
+            if _is_network_error(err):
+                logger.warning(
+                    f"[w{self.worker_id}][{cafe.id}] "
+                    "[network] SSL handshake failed — check VPN"
+                )
+                self._last_skip_reason = SkipReason.PAGE_NAV_FAILED
+            else:
+                logger.debug(
+                    f"[w{self.worker_id}][{cafe.id}] bare retry nav failed: {err}"
+                )
             return False
 
         # Check if we landed on a place page directly
@@ -501,15 +528,33 @@ class ScraperWorker:
                             f"[w{self.worker_id}][{cafe.id}] bare retry matched "
                             f"via first result (dist={dist:.1f}m)"
                         )
-                        await page.goto(
-                            href,
-                            timeout=self.config.PAGE_LOAD_TIMEOUT_MS,
-                            wait_until="commit",
-                        )
-                        await page.wait_for_timeout(
-                            self.config.POST_GOTO_SETTLE_MS
-                        )
-                        return True
+                        try:
+                            await page.goto(
+                                href,
+                                timeout=self.config.PAGE_LOAD_TIMEOUT_MS,
+                                wait_until="commit",
+                            )
+                            await page.wait_for_timeout(
+                                self.config.POST_GOTO_SETTLE_MS
+                            )
+                            return True
+                        except Exception as err:
+                            if _is_crash_error(err):
+                                raise
+                            if _is_network_error(err):
+                                logger.warning(
+                                    f"[w{self.worker_id}][{cafe.id}] "
+                                    "[network] SSL handshake failed — check VPN"
+                                )
+                                self._last_skip_reason = (
+                                    SkipReason.PAGE_NAV_FAILED
+                                )
+                            else:
+                                logger.debug(
+                                    f"[w{self.worker_id}][{cafe.id}] "
+                                    f"bare retry first link nav failed: {err}"
+                                )
+                            return False
                     logger.debug(
                         f"[w{self.worker_id}][{cafe.id}] bare retry first link "
                         f"coords match but name mismatch: "
@@ -711,6 +756,13 @@ class ScraperWorker:
             except Exception as err:
                 if _is_crash_error(err):
                     raise
+                if _is_network_error(err):
+                    logger.warning(
+                        f"[w{self.worker_id}][{target.cafe.id}] "
+                        "[network] SSL handshake failed — check VPN"
+                    )
+                    self._last_skip_reason = SkipReason.PAGE_NAV_FAILED
+                    return []
                 consecutive_timeouts += 1
                 logger.warning(
                     f"Worker {self.worker_id}: nav attempt {attempt}/{max_attempts} "

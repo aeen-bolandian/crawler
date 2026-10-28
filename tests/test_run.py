@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 import hashlib
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -502,4 +503,34 @@ async def test_pipeline_fail_fast_on_zero_shard_cafes() -> None:
         await pipeline.run()
 
     assert exc_info.value.code == 1
+
+
+def test_check_network_success() -> None:
+    """Verify _check_network returns True when Maps responds 200."""
+    from run import _check_network
+
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.__enter__.return_value = mock_resp
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        assert _check_network() is True
+
+
+def test_check_network_failure() -> None:
+    """Verify _check_network returns False when connection fails."""
+    from run import _check_network
+
+    with patch("urllib.request.urlopen", side_effect=OSError("network down")):
+        assert _check_network() is False
+
+
+def test_emergency_state_flush(tmp_path: Path) -> None:
+    """Verify _emergency_state_flush writes state atomically."""
+    from run import _emergency_state_flush
+
+    state_file = tmp_path / "emergency_state.json"
+    _emergency_state_flush(state_file, {"cafe-1", "cafe-2"})
+    assert state_file.exists()
+    data = json.loads(state_file.read_text(encoding="utf-8"))
+    assert data["processed_slugs"] == ["cafe-1", "cafe-2"]
 

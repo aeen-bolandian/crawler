@@ -88,9 +88,8 @@ async def test_duplicate_mark(tmp_path: Path) -> None:
     await mgr.mark_processed("cafe-dup")
     await mgr.flush()
 
-    with open(state_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        assert data["processed_slugs"] == ["cafe-dup"]
+    data = json.loads(state_file.read_text(encoding="utf-8"))
+    assert data["processed_slugs"] == ["cafe-dup"]
 
 
 @pytest.mark.asyncio
@@ -121,3 +120,16 @@ async def test_force_flush(tmp_path: Path) -> None:
 
     reloaded = StateManager(state_file)
     assert reloaded.is_processed("slug-1")
+
+
+@pytest.mark.asyncio
+async def test_flush_never_raises_on_disk_error(tmp_path: Path) -> None:
+    """Verify flush handles unexpected OS or write errors without raising."""
+    from unittest.mock import patch
+
+    state_file = tmp_path / "state.json"
+    mgr = StateManager(state_file)
+    await mgr.mark_processed("slug-1")
+    with patch("pathlib.Path.write_text", side_effect=OSError("Disk failure")):
+        # Should NOT raise
+        await mgr.flush()

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import csv
 from dataclasses import dataclass
+import io
 from pathlib import Path
 import re
 from typing import Iterable
@@ -98,8 +99,10 @@ class CSVExporter:
             is_empty = file_exists and self.output_path.stat().st_size == 0
             write_header = (not file_exists) or is_empty
 
-            with open(
-                self.output_path, mode="a", encoding="utf-8-sig", newline=""
+            with io.TextIOWrapper(
+                io.FileIO(self.output_path, mode="a"),
+                encoding="utf-8-sig",
+                newline="",
             ) as f:
                 writer = csv.writer(f, quoting=csv.QUOTE_MINIMAL)
                 if write_header:

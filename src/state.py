@@ -51,19 +51,19 @@ class StateManager:
             return
 
         try:
-            with open(self.state_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if (
-                    isinstance(data, dict)
-                    and "processed_slugs" in data
-                    and isinstance(data["processed_slugs"], list)
-                ):
-                    self.processed = set(data["processed_slugs"])
-                    logger.info(
-                        f"Loaded {len(self.processed)} processed slugs from "
-                        f"{self.state_path}"
-                    )
-                else:
+            content = self.state_path.read_text(encoding="utf-8")
+            data = json.loads(content)
+            if (
+                isinstance(data, dict)
+                and "processed_slugs" in data
+                and isinstance(data["processed_slugs"], list)
+            ):
+                self.processed = set(data["processed_slugs"])
+                logger.info(
+                    f"Loaded {len(self.processed)} processed slugs from "
+                    f"{self.state_path}"
+                )
+            else:
                     logger.warning(
                         f"Malformed state structure in {self.state_path}. "
                         "Starting with an empty state."
@@ -105,31 +105,35 @@ class StateManager:
             self._flush_locked()
 
     def _flush_locked(self) -> None:
-        """Write current processed state to disk atomically using os.replace."""
-        if self.state_path.parent:
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        """Write current processed state to disk atomically without raising.
 
-        tmp_file = self.state_path.with_name(
-            f"{self.state_path.name}.tmp.{os.getpid()}"
-        )
-        payload = {"processed_slugs": sorted(self.processed)}
-
+        Replaces built-in open with Path.write_text() to survive interpreter
+        shutdown when builtins might be torn down.
+        """
         try:
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
+            if self.state_path.parent:
+                self.state_path.parent.mkdir(parents=True, exist_ok=True)
 
+            tmp_file = self.state_path.with_name(
+                f"{self.state_path.name}.tmp.{os.getpid()}"
+            )
+            payload = {"processed_slugs": sorted(self.processed)}
+            content = json.dumps(payload, indent=2, ensure_ascii=False)
+            tmp_file.write_text(content, encoding="utf-8")
             os.replace(tmp_file, self.state_path)
             self._dirty.clear()
             logger.debug(
                 f"Flushed {len(self.processed)} slugs to {self.state_path}"
             )
-        except OSError as err:
-            logger.error(f"Failed to flush state to {self.state_path}: {err}")
-            if tmp_file.exists():
-                try:
+        except Exception as err:
+            try:
+                if "tmp_file" in locals() and tmp_file.exists():
                     tmp_file.unlink()
-                except OSError:
-                    pass
-            raise
+            except Exception:
+                pass
+            try:
+                logger.error(
+                    f"Failed to flush state to {self.state_path}: {err}"
+                )
+            except Exception:
+                pass
