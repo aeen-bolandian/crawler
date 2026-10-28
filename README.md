@@ -88,6 +88,24 @@ When the script finishes, your reviews are saved under `data/`:
 
 ---
 
+## Retry Skipped Cafes (Optional)
+
+Some cafes are skipped during the first run (Google Maps not found, rate limit, etc.). Their list is saved in `data/skipped_shardNN.csv`.
+
+To retry them later (recommended: wait 1-2 hours after the main crawl):
+
+```bash
+./run_retry_skipped.sh N 15 data/skipped_shardNN.csv
+```
+
+Replace `N` with your shard number. This will:
+- Only process cafes from the skip CSV (not the whole shard)
+- Use 2 workers and 15-minute pauses to be extra gentle
+- Append new reviews to the existing CSV
+- Write new skips to `data/skipped_shardNN_retry.csv`
+
+---
+
 ## Run Command (Quick Reference)
 
 ```bash
