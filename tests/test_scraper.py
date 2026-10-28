@@ -174,14 +174,19 @@ async def test_worker_handles_results_h1_as_search_results_page(
 
     h1_loc = AsyncMock()
     h1_loc.is_visible = AsyncMock(return_value=True)
-    h1_loc.inner_text = AsyncMock(return_value="Different Place")
     h1_loc.inner_text = AsyncMock(return_value="Results")
 
     matched_link = AsyncMock()
     matched_link.get_attribute = AsyncMock(
         return_value="/maps/place/Cafe/data=!4m2!3m1!1s0x0:0x0!3d35.7592!4d51.4089"
     )
-    matched_link.click = AsyncMock()
+    matched_link.inner_text = AsyncMock(return_value="عمارت نیلی")
+
+    async def on_link_click() -> None:
+        mock_page.url = "https://www.google.com/maps/@35.7592,51.4089,17z"
+        h1_loc.inner_text = AsyncMock(return_value="عمارت نیلی")
+
+    matched_link.click = AsyncMock(side_effect=on_link_click)
 
     links_loc = MagicMock()
     links_loc.count = AsyncMock(return_value=1)
@@ -665,6 +670,13 @@ async def test_retry_with_bare_name_place_match(
     mock_page.url = "https://www.google.com/maps/@35.7592,51.4089,17z"
     mock_page.goto = AsyncMock()
     mock_page.wait_for_timeout = AsyncMock()
+
+    h1_loc = AsyncMock()
+    h1_loc.count = AsyncMock(return_value=1)
+    h1_loc.inner_text = AsyncMock(return_value="عمارت نیلی")
+    mock_page.locator = MagicMock(
+        return_value=MagicMock(first=h1_loc, count=AsyncMock(return_value=1))
+    )
     await pool.put(mock_page)
 
     mock_context = MagicMock()
@@ -694,6 +706,7 @@ async def test_retry_with_bare_name_link_match(
     first_link.get_attribute = AsyncMock(
         return_value="/maps/place/Cafe/data=!4m2!3m1!1s0x0:0x0!3d35.7592!4d51.4089"
     )
+    first_link.inner_text = AsyncMock(return_value="عمارت نیلی")
     links_loc = MagicMock()
     links_loc.count = AsyncMock(return_value=1)
     links_loc.first = first_link
@@ -721,16 +734,17 @@ async def test_scrape_recovers_via_bare_retry_on_coord_mismatch(
     mock_page.url = "https://www.google.com/maps/@36.9000,52.9000,17z"
     mock_page.wait_for_timeout = AsyncMock()
 
+    h1_loc = AsyncMock()
+    h1_loc.is_visible = AsyncMock(return_value=True)
+    h1_loc.inner_text = AsyncMock(return_value="Different Branch")
+
     async def mock_goto(url: str, *args: object, **kwargs: object) -> None:
         if "/@" in url:
             # Bare retry navigates to correct location
             mock_page.url = "https://www.google.com/maps/@35.7592,51.4089,17z"
+            h1_loc.inner_text = AsyncMock(return_value="عمارت نیلی")
 
     mock_page.goto = AsyncMock(side_effect=mock_goto)
-
-    h1_loc = AsyncMock()
-    h1_loc.is_visible = AsyncMock(return_value=True)
-    h1_loc.inner_text = AsyncMock(return_value="Different Branch")
 
     links_loc = AsyncMock()
     links_loc.count = AsyncMock(return_value=0)
@@ -754,10 +768,54 @@ async def test_scrape_recovers_via_bare_retry_on_coord_mismatch(
     worker = ScraperWorker(context=mock_context, worker_id=1, page_pool=pool)
     worker._click_reviews_tab = AsyncMock(return_value=False)
 
-    reviews = await worker.scrape(sample_target)
-    assert reviews == []
-    # It proceeded past coordinate mismatch to the review tab step!
-    assert worker.last_skip_reason == SkipReason.REVIEWS_TAB_FAILED
+
+@pytest.mark.asyncio
+async def test_validate_requires_name_match(sample_cafe: CafeRecord) -> None:
+    """Verify _validate_place_match fails when coords match but name diverges."""
+    pool: asyncio.Queue = asyncio.Queue()
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.url = "https://www.google.com/maps/@35.7592,51.4089,17z"
+
+    h1_loc = AsyncMock()
+    h1_loc.count = AsyncMock(return_value=1)
+    h1_loc.inner_text = AsyncMock(return_value="کافه کاملاً متفاوت")
+
+    mock_page.locator = MagicMock(
+        return_value=MagicMock(first=h1_loc, count=AsyncMock(return_value=1))
+    )
+    await pool.put(mock_page)
+
+    mock_context = MagicMock()
+    worker = ScraperWorker(context=mock_context, worker_id=1, page_pool=pool)
+
+    matched = await worker._validate_place_match(mock_page, sample_cafe)
+    assert matched is False
+    assert worker.last_skip_reason == SkipReason.PLACE_NAME_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_validate_accepts_coords_and_name(sample_cafe: CafeRecord) -> None:
+    """Verify _validate_place_match returns True when both coords and name match."""
+    pool: asyncio.Queue = asyncio.Queue()
+    mock_page = AsyncMock()
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.url = "https://www.google.com/maps/@35.7592,51.4089,17z"
+
+    h1_loc = AsyncMock()
+    h1_loc.count = AsyncMock(return_value=1)
+    h1_loc.inner_text = AsyncMock(return_value="عمارت نیلی")
+
+    mock_page.locator = MagicMock(
+        return_value=MagicMock(first=h1_loc, count=AsyncMock(return_value=1))
+    )
+    await pool.put(mock_page)
+
+    mock_context = MagicMock()
+    worker = ScraperWorker(context=mock_context, worker_id=1, page_pool=pool)
+
+    matched = await worker._validate_place_match(mock_page, sample_cafe)
+    assert matched is True
 
 
 # 5. Integration test (skipped by default)

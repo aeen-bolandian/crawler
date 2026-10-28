@@ -392,6 +392,27 @@ class ScraperWorker:
             f"role_main={main_c} | results_div={results_div_c}"
         )
 
+    async def _get_h1_text(self, page: Page) -> str:
+        """Extract and return text from the main place h1, or empty string.
+
+        Args:
+            page: Playwright Page to inspect.
+
+        Returns:
+            Stripped inner text of h1 if found, else empty string.
+        """
+        try:
+            h1 = page.locator(self.config.SEL_PLACE_H1)
+            count = await h1.count()
+            if isinstance(count, int) and count > 0:
+                val = await h1.first.inner_text(timeout=2000)
+                return val.strip() if isinstance(val, str) else ""
+        except Exception as exc:
+            if _is_crash_error(exc):
+                raise
+            logger.debug(f"[w{self.worker_id}] failed to get h1 text: {exc}")
+        return ""
+
     async def _retry_with_bare_name(
         self, page: Page, cafe: CafeRecord
     ) -> bool:
@@ -444,11 +465,18 @@ class ScraperWorker:
         ):
             dist = haversine_m(cafe.latitude, cafe.longitude, *page_coords)
             if dist <= MAX_MATCH_DISTANCE_STRICT_M:
-                logger.info(
-                    f"[w{self.worker_id}][{cafe.id}] bare retry matched "
-                    f"(dist={dist:.1f}m)"
+                page_name = await self._get_h1_text(page)
+                if page_name and names_look_same(cafe.name, page_name):
+                    logger.info(
+                        f"[w{self.worker_id}][{cafe.id}] bare retry matched "
+                        f"(dist={dist:.1f}m)"
+                    )
+                    return True
+                logger.debug(
+                    f"[w{self.worker_id}][{cafe.id}] bare retry: coords match "
+                    f"but name mismatch: db={cafe.name!r} page={page_name!r}"
                 )
-                return True
+                return False
 
         # Otherwise, try the first result link on a search results page
         links = page.locator(self.config.SEL_RESULT_LINK)
@@ -466,24 +494,99 @@ class ScraperWorker:
             ):
                 dist = haversine_m(cafe.latitude, cafe.longitude, *coords)
                 if dist <= MAX_MATCH_DISTANCE_STRICT_M:
-                    logger.info(
-                        f"[w{self.worker_id}][{cafe.id}] bare retry matched "
-                        f"via first result (dist={dist:.1f}m)"
+                    link_text = (await links.first.inner_text()).strip()
+                    if names_look_same(cafe.name, link_text):
+                        logger.info(
+                            f"[w{self.worker_id}][{cafe.id}] bare retry matched "
+                            f"via first result (dist={dist:.1f}m)"
+                        )
+                        await page.goto(
+                            href,
+                            timeout=self.config.PAGE_LOAD_TIMEOUT_MS,
+                            wait_until="commit",
+                        )
+                        await page.wait_for_timeout(
+                            self.config.POST_GOTO_SETTLE_MS
+                        )
+                        return True
+                    logger.debug(
+                        f"[w{self.worker_id}][{cafe.id}] bare retry first link "
+                        f"coords match but name mismatch: "
+                        f"db={cafe.name!r} link={link_text!r}"
                     )
-                    await page.goto(
-                        href,
-                        timeout=self.config.PAGE_LOAD_TIMEOUT_MS,
-                        wait_until="commit",
-                    )
-                    await page.wait_for_timeout(
-                        self.config.POST_GOTO_SETTLE_MS
-                    )
-                    return True
         except Exception as err:
             logger.debug(
                 f"[w{self.worker_id}][{cafe.id}] bare retry link failed: {err}"
             )
         return False
+
+    async def _validate_place_match(
+        self, page: Page, cafe: CafeRecord
+    ) -> bool:
+        """Validate that the current page matches the target cafe.
+
+        Requires BOTH coordinate match (within MAX_MATCH_DISTANCE_STRICT_M)
+        and name match (via names_look_same). If coordinates diverge,
+        retries with bare name+city.
+
+        Args:
+            page: Current Playwright page.
+            cafe: CafeRecord being validated.
+
+        Returns:
+            True if place matches both coordinate and name, False otherwise.
+        """
+        page_coords = extract_coords_from_url(page.url)
+        if (
+            page_coords
+            and cafe.has_coordinates
+            and cafe.latitude is not None
+            and cafe.longitude is not None
+        ):
+            dist = haversine_m(
+                cafe.latitude,
+                cafe.longitude,
+                page_coords[0],
+                page_coords[1],
+            )
+            if dist <= MAX_MATCH_DISTANCE_STRICT_M:
+                page_name = await self._get_h1_text(page)
+                if page_name and names_look_same(cafe.name, page_name):
+                    return True
+                logger.warning(
+                    f"[w{self.worker_id}][{cafe.id}] coords match (dist={dist:.1f}m) "
+                    f"but name mismatch: db={cafe.name!r} page={page_name!r}"
+                )
+                self._last_skip_reason = SkipReason.PLACE_NAME_MISMATCH
+                return False
+            else:
+                logger.warning(
+                    f"Coordinate mismatch for {cafe.slug}: "
+                    f"{dist:.1f}m > {MAX_MATCH_DISTANCE_STRICT_M}m. "
+                    f"Retrying with bare name+city..."
+                )
+                if await self._retry_with_bare_name(page, cafe):
+                    return True
+                self._last_skip_reason = SkipReason.PLACE_COORDS_MISMATCH
+                return False
+        else:
+            page_name = await self._get_h1_text(page)
+            if page_name.lower() in ("results", "نتایج"):
+                await self._log_no_signal_diagnostics(
+                    page,
+                    cafe.id,
+                    f"place check remained on search results ('{page_name}')",
+                )
+                self._last_skip_reason = SkipReason.PAGE_SIGNAL_NONE
+                return False
+            if not page_name or not names_look_same(cafe.name, page_name):
+                logger.warning(
+                    f"Name mismatch for {cafe.slug}: "
+                    f"'{cafe.name}' vs '{page_name}'"
+                )
+                self._last_skip_reason = SkipReason.PLACE_NAME_MISMATCH
+                return False
+            return True
 
     def _trigger_rate_limit(self, cafe_slug: str) -> None:
         """Trigger shared rate limit pause event and log warning.
@@ -726,10 +829,20 @@ class ScraperWorker:
                         coords[1],
                     )
                     if dist <= MAX_MATCH_DISTANCE_LOOSE_M:
-                        matched_link = link
-                        break
+                        # Check name too
+                        link_text = (await link.inner_text()).strip()
+                        if names_look_same(target.cafe.name, link_text):
+                            matched_link = link
+                            break
+                        else:
+                            logger.debug(
+                                f"[w{self.worker_id}][{target.cafe.id}] "
+                                f"result #{idx} coords match (dist={dist:.1f}m) "
+                                f"but name mismatch: db={target.cafe.name!r} "
+                                f"link={link_text!r}"
+                            )
                 else:
-                    text = await link.inner_text()
+                    text = (await link.inner_text()).strip()
                     if names_look_same(target.cafe.name, text):
                         matched_link = link
                         break
@@ -762,59 +875,8 @@ class ScraperWorker:
                 logger.debug(
                     f"[w{self.worker_id}][{target.cafe.id}] validating place match"
                 )
-
-            # Validate venue on single place view
-            page_coords = extract_coords_from_url(page.url)
-            if (
-                page_coords
-                and target.cafe.has_coordinates
-                and target.cafe.latitude is not None
-                and target.cafe.longitude is not None
-            ):
-                dist = haversine_m(
-                    target.cafe.latitude,
-                    target.cafe.longitude,
-                    page_coords[0],
-                    page_coords[1],
-                )
-                if dist > MAX_MATCH_DISTANCE_STRICT_M:
-                    logger.warning(
-                        f"Coordinate mismatch for {target.cafe.slug}: "
-                        f"{dist:.1f}m > {MAX_MATCH_DISTANCE_STRICT_M}m. "
-                        f"Retrying with bare name+city..."
-                    )
-                    if await self._retry_with_bare_name(page, target.cafe):
-                        # Bare retry succeeded — now proceed to click Reviews tab
-                        # (the page is already on the correct place)
-                        # Fall through to the review-tab logic below
-                        pass
-                    else:
-                        self._last_skip_reason = SkipReason.PLACE_COORDS_MISMATCH
-                        return []
-            else:
-                try:
-                    val = await page.locator(
-                        self.config.SEL_PLACE_H1
-                    ).first.inner_text(timeout=2000)
-                    h1_text = val.strip() if isinstance(val, str) else ""
-                    if h1_text.lower() in ("results", "نتایج"):
-                        await self._log_no_signal_diagnostics(
-                            page,
-                            target.cafe.id,
-                            f"place check remained on search results ('{h1_text}')",
-                        )
-                        self._last_skip_reason = SkipReason.PAGE_SIGNAL_NONE
-                        return []
-                    if not names_look_same(target.cafe.name, h1_text):
-                        logger.warning(
-                            f"Name mismatch for {target.cafe.slug}: "
-                            f"'{target.cafe.name}' vs '{h1_text}'"
-                        )
-                        self._last_skip_reason = SkipReason.PLACE_NAME_MISMATCH
-                        return []
-                except Exception as err:
-                    if _is_crash_error(err):
-                        raise
+            if not await self._validate_place_match(page, target.cafe):
+                return []
 
         # Click reviews tab
         try:
