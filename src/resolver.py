@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 import math
 import re
+from urllib.parse import quote_plus
 import urllib.parse
 
 try:
@@ -512,38 +513,47 @@ def _short_address(search_address: str, keep_tail: int = 3) -> str:
 class LocationResolver:
     """Builds and resolves Google Maps search URLs from cafe records."""
 
-    def __init__(self, zoom: int = 17, lang: str = "en") -> None:
+    MAPS_BASE: str = "https://www.google.com/maps"
+
+    def __init__(
+        self,
+        zoom: int = 17,
+        lang: str = "en",
+        use_center: bool = False,
+    ) -> None:
         """Initialize the resolver with map display parameters.
 
         Args:
             zoom: Google Maps zoom level (default 17).
             lang: Google Maps UI language code (default 'en').
+            use_center: Whether to append center/zoom to URLs (default False).
         """
         self.zoom = zoom
         self.lang = lang
+        self.use_center = use_center
 
     def _build_url(self, query: str, cafe: CafeRecord) -> str:
-        """Construct a Google Maps web search URL with optional center/zoom.
+        """Build Google Maps search URL.
 
-        Args:
-            query: The unencoded search query string.
-            cafe: CafeRecord containing optional coordinates.
-
-        Returns:
-            Fully-formed URL string.
+        When cafe has coordinates, use the /search/QUERY/@lat,lng,z format so
+        Google Maps focuses results near the cafe. Otherwise fall back to
+        /search/?api=1&query=QUERY.
         """
-        base_url = "https://www.google.com/maps/search/?api=1"
-        encoded_query = urllib.parse.quote_plus(query)
-        url = f"{base_url}&query={encoded_query}&hl={self.lang}"
-
+        encoded = quote_plus(query)
         if (
             cafe.has_coordinates
             and cafe.latitude is not None
             and cafe.longitude is not None
         ):
-            url += f"&center={cafe.latitude},{cafe.longitude}&zoom={self.zoom}"
-
-        return url
+            return (
+                f"{self.MAPS_BASE}/search/{encoded}"
+                f"/@{cafe.latitude},{cafe.longitude},{self.zoom}z"
+                f"?hl={self.lang}"
+            )
+        return (
+            f"{self.MAPS_BASE}/search/?api=1"
+            f"&query={encoded}&hl={self.lang}"
+        )
 
     def resolve(self, cafe: CafeRecord) -> ResolvedTarget:
         """Resolve a CafeRecord into a primary search URL and fallbacks.

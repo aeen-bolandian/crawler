@@ -104,7 +104,7 @@ def test_resolve_with_search_address(sample_cafe_with_coords: CafeRecord) -> Non
     assert target.cafe == sample_cafe_with_coords
     assert target.strategy == ResolverStrategy.TEXT_SEARCH
     encoded_name = urllib.parse.quote_plus("کافه ندا ونک")
-    assert f"query={encoded_name}" in target.url
+    assert encoded_name in target.url
     assert urllib.parse.quote_plus("کوچه نگار") in target.url
     assert "کوچه نگار" in urllib.parse.unquote_plus(target.url)
 
@@ -135,21 +135,32 @@ def test_resolve_generates_fallbacks(sample_cafe_with_coords: CafeRecord) -> Non
     assert "کافه ندا ونک" in unquoted_fb_b
 
 
-def test_resolve_appends_coordinates(sample_cafe_with_coords: CafeRecord) -> None:
-    """Verify that center and zoom params are appended when coordinates present."""
-    resolver = LocationResolver(zoom=16)
+def test_resolve_with_coordinates_uses_search_slash_format(
+    sample_cafe_with_coords: CafeRecord,
+) -> None:
+    """Verify URL starts with /maps/search/.../@lat,lng,17z."""
+    resolver = LocationResolver()
     target = resolver.resolve(sample_cafe_with_coords)
 
-    assert "&center=35.7592,51.4089&zoom=16" in target.url
+    assert target.url.startswith("https://www.google.com/maps/search/")
+    expected_slash = (
+        f"/@{sample_cafe_with_coords.latitude},"
+        f"{sample_cafe_with_coords.longitude},17z"
+    )
+    assert expected_slash in target.url
+    assert "?hl=en" in target.url
 
 
-def test_resolve_omits_coordinates(sample_cafe_without_coords: CafeRecord) -> None:
-    """Verify that center and zoom params are omitted when coordinates are absent."""
+def test_resolve_without_coordinates_uses_api_query_format(
+    sample_cafe_without_coords: CafeRecord,
+) -> None:
+    """Verify fallback to /search/?api=1&query= when coordinates are absent."""
     resolver = LocationResolver()
     target = resolver.resolve(sample_cafe_without_coords)
 
-    assert "center=" not in target.url
-    assert "zoom=" not in target.url
+    assert target.url.startswith("https://www.google.com/maps/search/?api=1")
+    assert "query=" in target.url
+    assert "/@" not in target.url
 
 
 def test_resolve_encodes_persian(sample_cafe_with_coords: CafeRecord) -> None:
@@ -159,7 +170,7 @@ def test_resolve_encodes_persian(sample_cafe_with_coords: CafeRecord) -> None:
 
     assert "%" in target.url
     assert "hl=en" in target.url
-    assert target.url.startswith("https://www.google.com/maps/search/?api=1")
+    assert target.url.startswith("https://www.google.com/maps/search/")
 
 
 def test_haversine_distance() -> None:
