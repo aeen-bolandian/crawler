@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import csv
 from dataclasses import dataclass
+import hashlib
 import io
 from pathlib import Path
 import re
@@ -77,12 +78,13 @@ class CSVExporter:
         self.output_path = Path(output_path)
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
-        self._seen: set[tuple[str, str, str, str]] = set()
+        self._seen: set[bytes] = set()
 
     async def append_many(self, reviews: Iterable[ReviewRecord]) -> int:
         """Append review records to the CSV file safely under an asyncio lock.
 
         Only writes the CSV header when the file is freshly created or empty.
+        Uses MD5 digests in self._seen to minimize memory footprint.
 
         Args:
             reviews: Iterable of ReviewRecord instances.
@@ -109,12 +111,10 @@ class CSVExporter:
                     writer.writerow(self.COLUMNS)
                 written = 0
                 for review in review_list:
-                    key = (
-                        review.cafe_slug,
-                        review.author,
-                        review.date,
-                        review.text,
-                    )
+                    key_bytes = (
+                        f"{review.cafe_slug}\0{review.author}\0{review.date}\0{review.text}"
+                    ).encode("utf-8")
+                    key = hashlib.md5(key_bytes).digest()
                     if key in self._seen:
                         continue
                     self._seen.add(key)
