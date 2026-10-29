@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import gc
 import re
 import time
 from typing import Optional
@@ -217,6 +218,7 @@ class ScraperWorker:
             else:
                 await self.page_pool.put(self._page)
             self._page = None
+            gc.collect()
 
     async def _rotate_tab(self, page: Optional[Page] = None) -> Page:
         """Close current page, create a fresh page, and navigate to Google Maps.
@@ -236,6 +238,7 @@ class ScraperWorker:
                 logger.debug(
                     f"[w{self.worker_id}] error closing page during rotate: {err}"
                 )
+        gc.collect()
 
         new_page = await self.context.new_page()
         try:
