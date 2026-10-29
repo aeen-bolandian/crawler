@@ -137,7 +137,7 @@ for ($chunkIndex = 1; $chunkIndex -le $NumChunks; $chunkIndex++) {
     $ExitCode = $LASTEXITCODE
 
     Write-Host ""
-    Write-Host "📊 After chunk $chunkIndex:" -ForegroundColor Green
+    Write-Host "📊 After chunk ${chunkIndex}:" -ForegroundColor Green
     & $PythonExe -c "
 import csv, json, sys
 try:
