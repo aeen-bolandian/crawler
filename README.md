@@ -25,9 +25,18 @@ cd crawler
 
 ### 2. Create virtual environment and install dependencies
 
+**On Linux/macOS:**
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+```
+
+**On Windows (PowerShell):**
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 playwright install chromium
 ```
@@ -39,6 +48,8 @@ Copy the SQLite file you received into the root directory of this repository:
 ```bash
 # Verify the database is in the root directory
 ls -la cafes_cafe.db
+# Or on Windows:
+dir cafes_cafe*.db
 ```
 
 ### 4. Start Chrome with remote debugging
@@ -51,6 +62,9 @@ google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/chrome-debug-p
 
 # On macOS:
 /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --user-data-dir="$HOME/chrome-debug-profile" "https://www.google.com/maps" &
+
+# On Windows (PowerShell):
+Start-Process "C:\Program Files\Google\Chrome\Application\chrome.exe" -ArgumentList @("--remote-debugging-port=9222", "--user-data-dir=$HOME\chrome-debug-profile", "--remote-allow-origins=*", "https://www.google.com/maps")
 ```
 
 ### 5. Log into Google Maps
@@ -70,8 +84,14 @@ The scraper uses 2 concurrent workers and attaches to existing open tabs:
 
 Run the helper script with your assigned shard number `N` (e.g. `0` if you were assigned shard 0) and total shards `15`:
 
+**On Linux/macOS:**
 ```bash
 ./run_shard_with_restart.sh N 15
+```
+
+**On Windows (PowerShell):**
+```powershell
+.\run_shard_with_restart.ps1 N 15
 ```
 
 > **Note:** Replace `N` with your assigned shard number (`0` to `14`).
@@ -95,8 +115,13 @@ python scripts/dedup_csv.py data/reviews_shard*.csv
 ### Retry only timing-related skips
 Filter to failures that may succeed on retry (not genuine absences):
 ```bash
+# On Linux/macOS:
 grep -E "reviews_tab_could_not_be_clicked|review_cards_never_appeared|zero_reviews|no_page_signal|exception" data/skipped_shardNN.csv > data/skipped_shardNN_retryable.csv
 ./run_retry_skipped.sh N 15 data/skipped_shardNN_retryable.csv
+
+# On Windows (PowerShell):
+Select-String -Path data/skipped_shardNN.csv -Pattern "reviews_tab_could_not_be_clicked|review_cards_never_appeared|zero_reviews|no_page_signal|exception" | ForEach-Object { $_.Line } | Set-Content data/skipped_shardNN_retryable.csv
+.\run_retry_skipped.ps1 N 15 -InputSkipped data/skipped_shardNN_retryable.csv
 ```
 
 ---
@@ -107,8 +132,14 @@ Some cafes are skipped during the first run (Google Maps not found, rate limit, 
 
 To retry them later (recommended: wait 1-2 hours after the main crawl):
 
+**On Linux/macOS:**
 ```bash
 ./run_retry_skipped.sh N 15 data/skipped_shardNN.csv
+```
+
+**On Windows (PowerShell):**
+```powershell
+.\run_retry_skipped.ps1 N 15 -InputSkipped data/skipped_shardNN.csv
 ```
 
 Replace `N` with your shard number. This will:
@@ -121,8 +152,14 @@ Replace `N` with your shard number. This will:
 
 ## Run Command (Quick Reference)
 
+**Linux/macOS:**
 ```bash
 ./run_shard_with_restart.sh N 15
+```
+
+**Windows (PowerShell):**
+```powershell
+.\run_shard_with_restart.ps1 N 15
 ```
 
 Replace `N` with your assigned shard number (`0` through `14`).
@@ -142,7 +179,7 @@ Replace `N` with your assigned shard number (`0` through `14`).
 If the log shows `reviews_tab_could_not_be_clicked`, `review_cards_never_appeared`, or `zero_reviews`, wait for stable internet/VPN. Then retry just those cafes using the retry script (see below).
 
 - **Chrome crash / OOM:**
-  The scraper automatically rotates tabs every 10 cafes and restarts Chrome between 50-cafe chunks. If Chrome terminates unexpectedly, simply re-run `./run_shard_with_restart.sh N 15` — state is preserved and already scraped cafes are skipped.
+  The scraper automatically rotates tabs every 10 cafes and restarts Chrome between 50-cafe chunks. If Chrome terminates unexpectedly, simply re-run the restart script — state is preserved and already scraped cafes are skipped.
 - **Rate limit ("pausing all workers for 60s" or Google block):**
   If Google temporarily slows down responses, wait 30–60 minutes, then re-run the same command. Checkpointing ensures no duplicate work.
 - **CDP endpoint unreachable (`connect ECONNREFUSED 127.0.0.1:9222`):**
