@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import gc
 import re
 import time
 from typing import Optional
@@ -217,6 +218,7 @@ class ScraperWorker:
             else:
                 await self.page_pool.put(self._page)
             self._page = None
+            gc.collect()
 
     async def _rotate_tab(self, page: Optional[Page] = None) -> Page:
         """Close current page, create a fresh page, and navigate to Google Maps.
@@ -236,6 +238,7 @@ class ScraperWorker:
                 logger.debug(
                     f"[w{self.worker_id}] error closing page during rotate: {err}"
                 )
+        gc.collect()
 
         new_page = await self.context.new_page()
         try:
@@ -265,11 +268,32 @@ class ScraperWorker:
 
     async def _dismiss_consent(self, page: Page) -> None:
         """Dismiss Google consent dialogs if present."""
+        if "consent.google" in page.url.lower():
+            try:
+                role_btn = page.get_by_role(
+                    "button",
+                    name=re.compile(
+                        r"accept all|alle akzeptieren|tout accepter|accetta tutto|i agree|agree",
+                        re.I,
+                    ),
+                )
+                count = await role_btn.count()
+                for i in range(count):
+                    b = role_btn.nth(i)
+                    if await b.is_visible(timeout=1000):
+                        await b.click()
+                        await page.wait_for_timeout(3000)
+                        return
+            except Exception as err:
+                if _is_crash_error(err):
+                    raise
+
         for selector in self.config.CONSENT_SELECTORS:
             try:
                 btn = page.locator(selector).first
                 if await btn.is_visible(timeout=500):
                     await btn.click()
+                    await page.wait_for_timeout(1000)
                     break
             except Exception as err:
                 if _is_crash_error(err):
@@ -838,7 +862,7 @@ class ScraperWorker:
             if _is_crash_error(err):
                 raise
 
-        if h1_text.lower() in ("results", "نتایج"):
+        if h1_text.lower() in ("results", "نتایج", "before you continue to google") or "consent.google" in page.url.lower():
             is_place = False
 
         logger.debug(
