@@ -105,6 +105,8 @@ for ($chunkIndex = 1; $chunkIndex -le $NumChunks; $chunkIndex++) {
         "--remote-debugging-port=9222",
         "--remote-allow-origins=*",
         "--user-data-dir=$UserDataDir",
+        "--no-first-run",
+        "--no-default-browser-check",
         "https://www.google.com/maps"
     )
     Start-Sleep -Seconds 5
