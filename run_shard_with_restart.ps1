@@ -139,7 +139,7 @@ for ($chunkIndex = 1; $chunkIndex -le $NumChunks; $chunkIndex++) {
     Write-Host ""
     Write-Host "📊 After chunk ${chunkIndex}:" -ForegroundColor Green
     & $PythonExe -c "
-import csv, json, sys
+import csv, json
 try:
     with open('$Output', encoding='utf-8-sig') as f:
         rows = list(csv.DictReader(f))
@@ -147,7 +147,7 @@ try:
     print(f'   cafes: {len(slugs)}')
     print(f'   reviews: {len(rows)}')
     st = json.load(open('$State', encoding='utf-8'))
-    print(f'   checkpointed: {len(st[\"processed_slugs\"])}')
+    print(f'   checkpointed: {len(st.get(\'processed_slugs\', []))}')
 except Exception as e:
     print(f'   stats error: {e}')
 "
